@@ -3,6 +3,7 @@
   python -m argus ask "why is the fan loud?"      free-form question, read-only tools
   python -m argus scan --baseline                 learn current patterns, no model
   python -m argus scan [--host moneta]            investigate new or spiking patterns
+  python -m argus serve [--port 8082]             page to browse findings and give feedback
 """
 
 import argparse
@@ -11,6 +12,7 @@ import re
 import sys
 import time
 
+from . import serve
 from .agent import DATA_DIR, Agent
 from .patterns import Store, read_journal
 
@@ -21,16 +23,12 @@ answering. Be concise and say what you checked."""
 SCAN_SYSTEM = """You are argus, watching unattended Linux machines. You are given
 one log pattern that is new or suddenly frequent. Investigate it with the run
 tool (narrow journalctl queries, systemctl status, df, zpool status, ...), then
-decide whether a human should care. Machines: "local" is a Fedora workstation
+decide whether a human should care. You may be shown earlier verdicts on the
+same service and the owner's feedback on them; respect that feedback. Machines: "local" is a Fedora workstation
 used for ML experiments; "moneta" is a NixOS NAS with ZFS.
 
 End your answer with one plain-text line, nothing after it:
 VERDICT: ignore|watch|attention - <one sentence summary>"""
-
-FINDINGS = """CREATE TABLE IF NOT EXISTS findings (
-    id INTEGER PRIMARY KEY, pattern_id INTEGER, t REAL,
-    verdict TEXT, summary TEXT, answer TEXT, transcript TEXT)"""
-
 
 def show(kind, data):
     if kind == "tool":
@@ -66,7 +64,6 @@ def cmd_ask(args):
 def cmd_scan(args):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     store = Store(DATA_DIR / "argus.db")
-    store.db.execute(FINDINGS)
     cursor = store.cursor(args.host)
     new = store.ingest(args.host, read_journal(args.host, args.since, cursor))
     if args.baseline:
@@ -88,7 +85,14 @@ def cmd_scan(args):
         p = store.describe(pid)
         print(f"\n[{p['host']}] {p['ident']}: {p['template']}", file=sys.stderr)
         agent = Agent(SCAN_SYSTEM)
-        answer = agent.run(json.dumps(p, indent=1), on_event=show)
+        task = json.dumps(p, indent=1)
+        past = store.history(pid)
+        if past:
+            task += "\n\nEarlier verdicts on the same service:\n" + "\n".join(
+                f"- {t!r}: {v} ({s})"
+                + (f"; owner {fb}" + (f": {n}" if n else "") if fb else "")
+                for t, v, s, fb, n in past)
+        answer = agent.run(task, on_event=show)
         verdict, summary = parse_verdict(answer)
         store.db.execute(
             "INSERT INTO findings (pattern_id, t, verdict, summary, answer, "
@@ -113,6 +117,10 @@ def main():
     s.add_argument("--limit", type=int, default=10,
                    help="max patterns to investigate per run")
     s.set_defaults(func=cmd_scan)
+    v = sub.add_parser("serve")
+    v.add_argument("--port", type=int, default=8082)
+    v.add_argument("--bind", default="0.0.0.0")
+    v.set_defaults(func=lambda a: serve.serve(DATA_DIR / "argus.db", a.bind, a.port))
     args = ap.parse_args()
     args.func(args)
 

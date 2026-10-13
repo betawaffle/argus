@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS patterns (
     UNIQUE (host, ident, template)
 );
 CREATE TABLE IF NOT EXISTS cursors (host TEXT PRIMARY KEY, cursor TEXT);
+CREATE TABLE IF NOT EXISTS findings (
+    id INTEGER PRIMARY KEY, pattern_id INTEGER, t REAL,
+    verdict TEXT, summary TEXT, answer TEXT, transcript TEXT,
+    feedback TEXT, note TEXT
+);
 CREATE TABLE IF NOT EXISTS daily (
     pattern_id INTEGER, day TEXT, count INTEGER,
     PRIMARY KEY (pattern_id, day)
@@ -101,6 +106,11 @@ class Store:
     def __init__(self, path):
         self.db = sqlite3.connect(path)
         self.db.executescript(SCHEMA)
+        for col in ("feedback", "note"):  # databases from before feedback
+            try:
+                self.db.execute(f"ALTER TABLE findings ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError:
+                pass
 
     def cursor(self, host):
         row = self.db.execute("SELECT cursor FROM cursors WHERE host=?",
@@ -159,3 +169,18 @@ class Store:
                 "template": tmpl, "total": total, "sample": sample,
                 "first_seen": time.strftime("%Y-%m-%d %H:%M", time.localtime(first)),
                 "last_seen": time.strftime("%Y-%m-%d %H:%M", time.localtime(last))}
+
+    def history(self, pid, limit=6):
+        """Earlier judged findings from the same source, feedback first.
+
+        This is argus's memory: the model sees what it concluded before about
+        this service and whether Andy agreed, so it repeats itself less.
+        """
+        return self.db.execute(
+            """SELECT p.template, f.verdict, f.summary, f.feedback, f.note
+               FROM findings f JOIN patterns p ON p.id = f.pattern_id
+               JOIN patterns q ON q.id = ?
+               WHERE p.host = q.host AND p.ident = q.ident AND p.id != q.id
+                 AND f.verdict != 'baseline'
+               ORDER BY f.feedback IS NULL, f.t DESC LIMIT ?""",
+            (pid, limit)).fetchall()

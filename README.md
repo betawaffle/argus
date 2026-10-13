@@ -14,6 +14,7 @@ Stdlib-only Python 3; nothing to install.
   repeats. Every step is logged to a JSONL transcript.
 - `argus/tools.py`: read-only tools. Commands run without a shell and must
   pass an allowlist. Other hosts are reached over ssh.
+- `argus/serve.py`: the findings page.
 - `argus/patterns.py`: plain code collapses journal lines into patterns
   (numbers, IPs, UUIDs stripped) and keeps counts in SQLite, so only new or
   spiking patterns reach the model.
@@ -24,12 +25,21 @@ Stdlib-only Python 3; nothing to install.
     python3 -m argus scan --baseline          # first run: today's noise is normal
     python3 -m argus scan                     # investigate new or spiking patterns
     python3 -m argus scan --host moneta       # needs ssh to moneta from this box
+    python3 -m argus serve                    # findings page on :8082
 
 Run data (pattern DB, findings, transcripts) goes to `~/.local/share/argus`
 (`ARGUS_DATA`), never into the repo.
 
+The page lists open findings (attention and watch first). You can agree with
+or dismiss each one and leave a note. The next time the same service comes
+up, the model sees its earlier verdicts along with your feedback and notes.
+That way argus learns what you consider normal.
+
+Container output is kept only when it looks like trouble (errors,
+tracebacks, OOM and similar). podman logs everything a container prints at
+error level, so the priority tells us nothing.
+
 ## Next
 
-- a page to browse findings and mark them agreed or dismissed
-- feed past verdicts back to the model, so it gets quieter over time
+- moneta (needs an ssh key from the box)
 - notifications (later)
