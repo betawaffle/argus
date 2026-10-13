@@ -85,9 +85,34 @@ things later.
   measure it: a field whose distinct-values-to-occurrences ratio is near 1
   is volatile. `journal-fields.md` has the counts, and the check adapts per
   host.
+  Measured on the box: the share of each field's values that recur across
+  boots (rough, since there are only 3 boots):
+  - never recur (0-8%): cursors, timestamps, `_BOOT_ID`, `_PID`, `TID`,
+    `SYSLOG_PID`, all `*INVOCATION_ID`, `_STREAM_ID`, `JOB_ID`, `LEADER`,
+    `CONTAINER_ID/NAME`, `PODMAN_ID/NAME`, `SYSLOG_TIMESTAMP`
+  - unstable (16-48%), usable only after normalizing: `_CMDLINE`,
+    `_SYSTEMD_CGROUP`, `_SYSTEMD_UNIT` (session/run scopes), `_SYSTEMD_SESSION`,
+    `SESSION_ID`, `_AUDIT_ID`, `SYSLOG_IDENTIFIER` (random container names)
+  - stable (70-100%): `_TRANSPORT`, `_EXE`, `_COMM`, `_UID`,
+    `_SELINUX_CONTEXT`, `_SYSTEMD_SLICE`, `PRIORITY`, `MESSAGE_ID`, `CODE_*`,
+    `_KERNEL_*`, `_UDEV_SYSNAME`, `_AUDIT_TYPE_NAME`, `PODMAN_EVENT`, `NM_DEVICE`,
+    and the normalized units
+
+  This suggests an **allowlist of matchable fields** backed by this
+  measurement. Volatile fields remain useful for **grouping**: `_STREAM_ID`,
+  `_PID` and `INVOCATION_ID` identify one traceback or one run of a service.
+- Actions get a read-only view of the event. `MESSAGE` can be a byte array,
+  so decode it once, up front. Actions that store data store chosen fields,
+  not whole entries, because those carry command lines, IPs and so on.
 - **Different code paths per transport:**
   - **stdout:** group lines into bursts by `_STREAM_ID` and timing *before*
-    matching. This is where multi-line output and noise get handled.
+    matching. This is where multi-line output and noise get handled. On the
+    box, 7,665 stdout lines came from just 59 streams, mostly an installer
+    listing, llm-server, tailscaled, dnf5-automatic and open-webui.
+  - **container output is not stdout.** podman's log driver writes it as
+    `_TRANSPORT=journal` with `CONTAINER_*` fields, so it needs the same noisy
+    path, grouped by container (or image) and `_PID`. Rules see both the
+    whole group and the single line.
   - **audit:** almost all field rules, no regex.
   - **kernel:** treat boot-time output (low monotonic timestamp) as its own
     phase, since that's where most kernel noise is.
