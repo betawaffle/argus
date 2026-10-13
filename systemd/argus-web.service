@@ -1,0 +1,13 @@
+[Unit]
+Description=argus findings page
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/work/argus
+ExecStart=/usr/bin/python3 -m argus serve --port 8082
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

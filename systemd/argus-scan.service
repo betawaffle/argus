@@ -1,0 +1,8 @@
+[Unit]
+Description=argus journal scan
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/argus
+ExecStart=/usr/bin/python3 -m argus scan --limit 10
+Environment=PYTHONUNBUFFERED=1

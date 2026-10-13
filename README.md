@@ -27,6 +27,9 @@ Stdlib-only Python 3; nothing to install.
     python3 -m argus scan --host moneta       # needs ssh to moneta from this box
     python3 -m argus serve                    # findings page on :8082
 
+On the box, `systemd/install.sh` installs the page and a daily 06:00 scan
+as user services.
+
 Run data (pattern DB, findings, transcripts) goes to `~/.local/share/argus`
 (`ARGUS_DATA`), never into the repo.
 

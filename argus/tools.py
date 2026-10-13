@@ -15,7 +15,7 @@ MAX_OUTPUT = 12_000  # chars; prompt processing is ~1K tok/s, keep results short
 # command -> allowed first argument (None means any arguments are fine)
 ALLOWED = {
     "journalctl": None,
-    "systemctl": {"status", "list-units", "list-timers", "show", "is-failed",
+    "systemctl": {"status", "cat", "list-units", "list-timers", "show", "is-failed",
                   "is-active", "--failed"},
     "df": None, "free": None, "uptime": None, "uname": None, "lsblk": None,
     "ip": {"addr", "link", "route", "-br"},
@@ -26,6 +26,8 @@ ALLOWED = {
     "tail": None, "wc": None, "stat": None, "findmnt": None,
     "podman": {"ps", "inspect", "logs", "images"},
     "rpm": {"-q", "-qa", "-qf", "-qi", "-ql"},
+    "getent": {"passwd", "group", "hosts"}, "id": None, "grep": None,
+    "lsusb": None, "lspci": None, "ldd": None,
 }
 # Flags that change state or never return (follow modes).
 FORBIDDEN = {
@@ -34,7 +36,10 @@ FORBIDDEN = {
     "dmesg": {"-C", "--clear", "-c", "--read-clear", "-w", "--follow", "-W"},
     "tail": {"-f", "-F", "--follow"},
     "podman": {"-f", "--follow"},
+    "grep": {"-r", "-R", "--recursive", "--dereference-recursive"},  # unbounded
 }
+# Shell habits the model can't shake; harmless to drop when trailing.
+DROPPABLE_TAIL = [["||", "true"], ["2>/dev/null"], ["2>&1"]]
 SHELL_OPS = {"|", "||", "&&", ";", ">", ">>", "<", "&", "2>&1"}
 # Readable by the user, but nothing the model needs to see.
 SECRET_PATHS = ("~/.ssh", "~/.gnupg", "~/.config/gh", "~/.netrc", "/etc/shadow",
@@ -82,6 +87,12 @@ def run(command, host="local", timeout=60):
         argv = shlex.split(command)
     except ValueError as e:
         return f"error: could not parse command: {e}"
+    dropped = True
+    while dropped:
+        dropped = False
+        for tail in DROPPABLE_TAIL:
+            if len(argv) > len(tail) and argv[-len(tail):] == tail:
+                argv, dropped = argv[:-len(tail)], True
     reason = check(argv)
     if reason:
         return f"refused: {reason}"
