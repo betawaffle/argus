@@ -154,8 +154,9 @@ new rule at first, until we trust it?
 
 ### 7. Where rules are stored (decided: git for rules, SQLite for state)
 
-Still open: one file per rule (clean diffs, easy per-rule history) or one
-file per source?
+Decided: **one file per source** (e.g. `rules/kernel.toml`,
+`rules/llm-server.service.toml`). Each file holds that source's rules in
+order, oldest first, which matches "older rule wins" during dispatch.
 
 ### 8. Multi-line events and noisy sources (needs several ideas)
 
