@@ -9,6 +9,8 @@ Flow of one run:
    history is a separate step.
 2. Each event goes to its source's rules; the first match wins and its
    actions run. Flagged rules also collect their lines until reviewed.
+   Unit-stdout copies of container lines are skipped (see
+   events.mark_mirrored).
 3. Unmatched events are grouped by source and rough shape. The biggest
    groups (up to --learn) go to the model, one group per rule. After each
    new rule, the remaining groups are re-checked against it.
@@ -101,12 +103,17 @@ class Engine:
             self.log("first run: watching from now on")
             return
         groups = defaultdict(list)   # (source, shape) -> events
-        n = matched = 0
+        n = matched = mirrored = 0
         for e in self._pending():
             self._sort(e, groups)
         source_lines = defaultdict(list)   # recent lines per source, for checks
-        for e in events_iter if events_iter is not None else events.read(self.host, cursor):
+        stream = events_iter if events_iter is not None else events.read(self.host, cursor)
+        for e in events.mark_mirrored(stream):
             n += 1
+            cursor = e.get("__CURSOR", cursor)
+            if e.get("__MIRRORED"):  # the container copy of the line is handled
+                mirrored += 1
+                continue
             src = events.source(e)
             if len(source_lines[src]) < 2000:
                 source_lines[src].append(e)
@@ -114,14 +121,14 @@ class Engine:
                 matched += 1
             else:
                 groups[(src, template(e["MESSAGE"]))].append(e)
-            cursor = e.get("__CURSOR", cursor)
             if n % 5000 == 0:
                 self.set_cursor(cursor)
                 self.db.commit()
         if cursor:
             self.set_cursor(cursor)
         self.db.commit()
-        self.log(f"{n} events, {matched} matched, {len(groups)} unmatched groups")
+        self.log(f"{n} events, {matched} matched, {mirrored} container echoes "
+                 f"skipped, {len(groups)} unmatched groups")
 
         learned, tried = 0, set()
         while learned < learn_limit:

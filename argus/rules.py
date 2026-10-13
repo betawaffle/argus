@@ -218,7 +218,12 @@ def check(rule, src, ruleset, examples, recent=()):
         re.compile(regex)
     except re.error as e:
         return p + [f"regex doesn't compile: {e}"]
-    if not (STRUCTURED & set(match)) and literal_chars(regex) < MIN_LITERAL:
+    narrowing = STRUCTURED & set(match)
+    if src.endswith("/container"):
+        # All container output is forwarded by the same conmon call, so
+        # CODE_FILE/CODE_LINE there say nothing about the line.
+        narrowing -= {"CODE_FILE"}
+    if not narrowing and literal_chars(regex) < MIN_LITERAL:
         p.append(f"too unspecific: the regex needs at least {MIN_LITERAL} literal "
                  "characters unless match uses MESSAGE_ID or CODE_FILE")
     p += blocks.validate(rule.get("actions"))
@@ -239,10 +244,36 @@ def check(rule, src, ruleset, examples, recent=()):
             p.append(f"overlaps with older rule {older.name!r} (it also matches "
                      f"{hits[0][:200]!r}); the older rule wins, so narrow this one "
                      f"or merge them: {json.dumps(older.rule)}")
+    p += identity_problems(rule, c, examples, recent)
     shapes = {template(e["MESSAGE"]) for e in recent if c.test(e) is not None}
     if len(shapes) > MAX_TEMPLATES:
         p.append(f"too broad: matches {len(shapes)} differently shaped lines from "
                  f"this source, e.g. {sorted(shapes)[:3]}")
+    return p
+
+
+def identity_problems(rule, c, examples, recent=()):
+    """distinct/track on a field that differs on nearly every line (a
+    timestamp, a counter) would raise an alert per line."""
+    p = []
+    lines = list({id(e): e for e in [*examples, *recent]}.values())
+    for a in blocks.walk(rule.get("actions")):
+        if a.get("block") not in ("distinct", "track") or not (
+                a.get("on_new") or a.get("on_change")):
+            continue
+        f = a.get("field")
+        values = []
+        for e in lines:
+            g = c.test(e)
+            if g is not None and g.get(f, e.get(f)) is not None:
+                values.append(str(g.get(f, e.get(f))))
+        if len(values) >= 5 and len(set(values)) > 0.8 * len(values):
+            p.append(f"{a['block']} on {f!r}: it has {len(set(values))} different "
+                     f"values in {len(values)} lines (e.g. {values[0]!r}, "
+                     f"{values[1]!r}), so {'on_new' if a['block'] == 'distinct' else 'on_change'}"
+                     " would fire on almost every line. That field isn't an "
+                     "identity; use extract or count for it, or pick a field "
+                     "that repeats.")
     return p
 
 

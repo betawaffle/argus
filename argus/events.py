@@ -22,6 +22,9 @@ MATCHABLE = {
     "PODMAN_EXIT_CODE", "NM_DEVICE", "NM_LOG_DOMAINS", "UNIT", "USER_UNIT",
     "JOB_TYPE", "JOB_RESULT", "UNIT_RESULT", "EXIT_CODE", "EXIT_STATUS",
     "ERRNO", "INTERFACE",
+    # Set by the sender, but rules are already scoped to a source, so this
+    # only narrows within it.
+    "SYSLOG_IDENTIFIER",
 } | {f"AUDIT_FIELD_{f}" for f in (
     "RES", "OP", "EXE", "TERMINAL", "ACCT", "KIND", "GRANTORS", "UNIT", "COMM",
     "DIRECTION", "SW_TYPE")}
@@ -100,6 +103,33 @@ def read(host="local", cursor=None, since=None, extra=()):
         e["MESSAGE"] = message_text(e)
         yield e
     proc.wait()
+
+
+def mark_mirrored(events, chunk=2000):
+    """Mark unit-stdout copies of container lines with __MIRRORED.
+
+    A unit that runs podman attached logs each container line twice: once
+    from the journald log driver (with CONTAINER_ID) and once as podman's
+    own stdout. The container copy is the one kept. Works in chunks, so the
+    two copies only have to land within `chunk` events of each other.
+    """
+    buf = []
+
+    def flush():
+        container = {(e.get("_SYSTEMD_UNIT"), e["MESSAGE"].rstrip("\n"))
+                     for e in buf if "CONTAINER_ID" in e}
+        for e in buf:
+            if ("CONTAINER_ID" not in e
+                    and (e.get("_SYSTEMD_UNIT"), e["MESSAGE"].rstrip("\n")) in container):
+                e["__MIRRORED"] = True
+            yield e
+        buf.clear()
+
+    for e in events:
+        buf.append(e)
+        if len(buf) >= chunk:
+            yield from flush()
+    yield from flush()
 
 
 def latest_cursor(host="local"):

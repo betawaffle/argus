@@ -12,7 +12,7 @@ from pathlib import Path
 TMP = tempfile.mkdtemp()
 os.environ["ARGUS_DATA"] = TMP  # before importing argus: transcripts go here
 
-from argus import blocks, engine, events, rules  # noqa: E402
+from argus import blocks, engine, events, learn, rules  # noqa: E402
 
 
 def ev(msg, cursor="c", t=1_760_000_000, **fields):
@@ -97,6 +97,24 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(rules.check(r, "demo.service", self.rs,
                                      [ev("Started x", MESSAGE_ID="39f5")]), [])
 
+    def test_identity_field(self):
+        r = self.rule(regex=r"^(?P<up>[\d.]+) srv slot (?P<slot>\d)", actions=[
+            {"block": "distinct", "field": "up",
+             "on_new": {"block": "flag", "severity": "watch", "summary": "new {up}"}}])
+        lines = [ev(f"{i}.46.111.{i}36 srv slot {i % 2}") for i in range(10)]
+        p = rules.check(r, "demo.service", self.rs, lines)
+        self.assertTrue(any("isn't an identity" in x for x in p), p)
+        r["actions"][0]["field"] = "slot"   # repeats: fine
+        self.assertEqual(rules.check(r, "demo.service", self.rs, lines), [])
+
+    def test_code_file_on_container_output(self):
+        r = rules.make({"name": "any_line", "match": {"CODE_FILE": "src/ctr_logging.c"},
+                        "regex": "x", "actions": [{"block": "count"}]}, [])
+        e = [ev("x", CODE_FILE="src/ctr_logging.c", CONTAINER_ID="abc")]
+        self.assertTrue(any("unspecific" in x for x in
+                            rules.check(r, "demo.service/container", self.rs, e)))
+        self.assertEqual(rules.check(r, "demo.service", self.rs, e), [])
+
     def test_volatile_field(self):
         p = rules.check(self.rule(match={"_PID": "123"}), "demo.service", self.rs,
                         [ev("disk sda slow")])
@@ -165,6 +183,13 @@ class TestBlocks(unittest.TestCase):
             self.run_rule(a, {"user": u})
         self.assertEqual(self.alerts(), [("watch", "new a"), ("watch", "new b")])
 
+    def test_distinct_new_and_unknown_placeholders(self):
+        a = [{"block": "distinct", "field": "peer",
+              "on_new": {"block": "flag", "severity": "watch",
+                         "summary": "peer {new} via {via}"}}]
+        self.run_rule(a, {"peer": "x"})
+        self.assertEqual(self.alerts(), [("watch", "peer x via {via}")])
+
     def test_collect_limit_and_extract(self):
         self.run_rule([{"block": "collect", "limit": 2}, {"block": "extract"}],
                       {"dev": "sda"}, n=4)
@@ -225,6 +250,32 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(eng.cursor(), "c12")
         # reload from disk gives the same rules
         self.assertEqual(rules.RuleSet(rules_dir).all(), rs.all())
+
+    def test_container_echo_skipped(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        rs.add("demo.service/container", rules.make(
+            {"name": "slot_release", "regex": "slot release",
+             "actions": [{"block": "count"}]}, []), "t")
+        eng = engine.Engine("local", db=sqlite3.connect(":memory:"), ruleset=rs,
+                            llm=FakeLLM([]), log=lambda m: None)
+        batch = [ev("srv slot release\n", cursor="c1", CONTAINER_ID="abc"),
+                 ev("srv slot release\n", cursor="c2", _TRANSPORT="stdout"),
+                 ev("srv slot release", cursor="c3", _TRANSPORT="stdout")]
+        eng.run(learn_limit=0, events_iter=batch)
+        self.assertEqual(dict(eng.db.execute("SELECT rule, hits FROM rule_stats")),
+                         {"slot_release": 1})
+        self.assertEqual(eng.db.execute("SELECT count(*) FROM pending").fetchone()[0], 0)
+        self.assertEqual(eng.cursor(), "c3")
+
+    def test_proposal_cap(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        bad = {"name": "x_rule", "regex": "(", "actions": [{"block": "count"}],
+               "reason": "x"}
+        good = {**bad, "regex": "disk slow"}
+        llm = FakeLLM([bad] * learn.MAX_PROPOSALS + [good])
+        rule, ok, _ = learn.Learner(rs, llm=llm).learn("demo.service", [ev("disk slow")])
+        self.assertFalse(ok)
+        self.assertTrue(rule["name"].startswith("unlearned_"))
 
     def test_new_rule_covers_other_groups(self):
         # "sda" and "sdb" template differently, but one rule covers both.

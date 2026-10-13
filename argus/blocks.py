@@ -118,11 +118,17 @@ def _extract(p, ctx, key):
                             (ctx["rule"], ctx["t"], json.dumps(data)))
 
 
+class _Keep(dict):
+    def __missing__(self, k):
+        return "{" + k + "}"
+
+
 def _flag(p, ctx, key):
     summary = p.get("summary", "")
     try:  # summaries may mention named groups: "disk {dev} failing"
-        summary = summary.format(**ctx["groups"])
-    except (KeyError, IndexError, ValueError):
+        # Unknown placeholders stay as written instead of spoiling the rest.
+        summary = summary.format_map(_Keep(ctx["groups"]))
+    except (IndexError, ValueError):
         pass
     ctx["state"].alert(ctx["rule"], p.get("severity", "watch"), summary, ctx)
 
@@ -182,7 +188,8 @@ def _distinct(p, ctx, key):
         "INSERT OR IGNORE INTO distinct_values VALUES (?,?,?,?)",
         (ctx["rule"], p["field"], str(value), ctx["t"]))
     if cur.rowcount and "on_new" in p:
-        run_actions(p["on_new"], ctx, key + ".on_new")
+        sub = {**ctx, "groups": {**ctx["groups"], "new": str(value)}}
+        run_actions(p["on_new"], sub, key + ".on_new")
 
 
 # name -> (function, {param: (type, required)}, description for the model)
@@ -210,8 +217,20 @@ BLOCKS = {
               "when it changes ({old} and {new} available to flag)."),
     "distinct": (_distinct, {"field": (str, True), "on_new": (object, False)},
                  "Remember every value of a field or group seen; run `on_new` "
-                 "for a value never seen before."),
+                 "for a value never seen before ({new} available to flag)."),
 }
+
+
+def walk(actions):
+    """Every block in actions, including nested then/on_change/on_new."""
+    if isinstance(actions, dict):
+        actions = [actions]
+    for a in actions if isinstance(actions, list) else ():
+        if isinstance(a, dict):
+            yield a
+            for sub in ("then", "on_change", "on_new"):
+                if sub in a:
+                    yield from walk(a[sub])
 
 
 def validate(actions, path="actions"):

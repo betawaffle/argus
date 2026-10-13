@@ -51,6 +51,12 @@ How to choose actions:
 - changing state (link up/down, pool health, versions): track with on_change
 - new users, devices, addresses: distinct with on_new
 - something you can't judge from the lines alone: investigate
+- collect only lines a human should read later (errors, rare events), not
+  routine chatter; never combine ignore with other blocks
+- severity attention is for things that need fixing soon; routine changes
+  (DHCP leases, NAT endpoints, ports) are watch at most, or just track
+- distinct and track need a field that repeats (a unit, user, device), not
+  one that differs on every line (timestamps, uptimes, counters, ports)
 Use the run tool to check the machine if that helps you judge.
 
 Call propose_rule when ready. If it reports problems, fix them and call it
@@ -94,6 +100,8 @@ class Learner:
         def propose_rule(name, actions, reason="", match=None, regex=None,
                          replace=False):
             outcome["proposals"] += 1
+            if outcome["proposals"] > MAX_PROPOSALS:
+                return "problem: too many attempts; argus will store a fallback. Stop now."
             proposal = {"name": name, "match": match or {}, "regex": regex,
                         "actions": actions}
             rule = rules.make(proposal, examples)
