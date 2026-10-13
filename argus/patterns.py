@@ -19,7 +19,8 @@ SUBS = [
     (re.compile(r"\b[0-9a-f:]*:[0-9a-f:]*:[0-9a-f:]+\b", re.I), "<IP6>"),
     (re.compile(r"\b0x[0-9a-f]+\b", re.I), "<HEX>"),
     (re.compile(r"\b[0-9a-f]{12,}\b", re.I), "<HEX>"),
-    (re.compile(r"\d+(?:\.\d+)?"), "<N>"),
+    # Not digits inside names like i8042, sda1 or ext4.
+    (re.compile(r"(?<![A-Za-z_\d])\d+(?:\.\d+)?"), "<N>"),
 ]
 PRIORITY_NAMES = "emerg alert crit err warning notice info debug".split()
 
@@ -47,9 +48,16 @@ def read_journal(host="local", since="-1d", cursor=None, max_priority=4):
             continue
 
 
+TRANSIENT_SCOPE = re.compile(r"^run-p\d+-i\d+\.scope$")
+
+
 def ident(entry):
-    return (entry.get("_SYSTEMD_UNIT") or entry.get("SYSLOG_IDENTIFIER")
-            or entry.get("_COMM") or "?")
+    # User services all share _SYSTEMD_UNIT=user@UID.service; the user unit
+    # says which one it really is.
+    unit = entry.get("_SYSTEMD_USER_UNIT") or entry.get("_SYSTEMD_UNIT")
+    if unit and TRANSIENT_SCOPE.match(unit):  # systemd-run: new name every run
+        unit = "run-<N>.scope"
+    return unit or entry.get("SYSLOG_IDENTIFIER") or entry.get("_COMM") or "?"
 
 
 def message_text(entry):

@@ -5,6 +5,8 @@ model can look around but can't change anything. Remote hosts are reached
 over ssh with the same check applied before the command leaves this box.
 """
 
+import glob
+import os
 import shlex
 import subprocess
 
@@ -23,6 +25,7 @@ ALLOWED = {
     "sensors": None, "dmesg": None, "cat": None, "ls": None, "head": None,
     "tail": None, "wc": None, "stat": None, "findmnt": None,
     "podman": {"ps", "inspect", "logs", "images"},
+    "rpm": {"-q", "-qa", "-qf", "-qi", "-ql"},
 }
 # Flags that change state or never return (follow modes).
 FORBIDDEN = {
@@ -32,6 +35,12 @@ FORBIDDEN = {
     "tail": {"-f", "-F", "--follow"},
     "podman": {"-f", "--follow"},
 }
+SHELL_OPS = {"|", "||", "&&", ";", ">", ">>", "<", "&", "2>&1"}
+# Readable by the user, but nothing the model needs to see.
+SECRET_PATHS = ("~/.ssh", "~/.gnupg", "~/.config/gh", "~/.netrc", "/etc/shadow",
+                "/etc/gshadow", "/etc/ssh/ssh_host_", "/var/lib/tailscale")
+SECRET_PATHS = tuple(os.path.expanduser(p) for p in SECRET_PATHS)
+
 # Commands where privileged reads are expected and harmless.
 NEEDS_SUDO = {"smartctl", "dmesg"}
 
@@ -41,6 +50,14 @@ def check(argv):
     if not argv:
         return "empty command"
     cmd, args = argv[0], argv[1:]
+    shellish = [a for a in argv if a in SHELL_OPS or a.endswith("|")]
+    if shellish:
+        return (f"there is no shell, so {shellish[0]} doesn't work; run one "
+                "command (journalctl -g PATTERN filters, -n N limits)")
+    secret = [a for a in args if os.path.abspath(os.path.expanduser(a))
+              .startswith(SECRET_PATHS)]
+    if secret:
+        return f"{secret[0]} holds secrets and is off limits"
     if cmd not in ALLOWED:
         return f"{cmd} is not on the read-only allowlist"
     first = ALLOWED[cmd]
@@ -52,6 +69,13 @@ def check(argv):
     return None
 
 
+def expand(arg):
+    """Expand a path glob the way a shell would; leave anything else alone."""
+    if "/" in arg and any(c in arg for c in "*?["):
+        return sorted(glob.glob(arg)) or [arg]
+    return [arg]
+
+
 def run(command, host="local", timeout=60):
     """Run an allowlisted command on host ("local" or an ssh destination)."""
     try:
@@ -61,6 +85,12 @@ def run(command, host="local", timeout=60):
     reason = check(argv)
     if reason:
         return f"refused: {reason}"
+    if host == "local":
+        argv = [m for a in argv for m in expand(a)]
+        # Re-check: a glob could have expanded into a secret path.
+        reason = check(argv)
+        if reason:
+            return f"refused: {reason}"
     if argv[0] in NEEDS_SUDO:
         argv = ["sudo", "-n"] + argv
     if host != "local":

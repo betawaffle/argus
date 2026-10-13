@@ -24,8 +24,8 @@ tool (narrow journalctl queries, systemctl status, df, zpool status, ...), then
 decide whether a human should care. Machines: "local" is a Fedora workstation
 used for ML experiments; "moneta" is a NixOS NAS with ZFS.
 
-Finish with one line of JSON and nothing after it:
-{"verdict": "ignore" | "watch" | "attention", "summary": "<one sentence>"}"""
+End your answer with one plain-text line, nothing after it:
+VERDICT: ignore|watch|attention - <one sentence summary>"""
 
 FINDINGS = """CREATE TABLE IF NOT EXISTS findings (
     id INTEGER PRIMARY KEY, pattern_id INTEGER, t REAL,
@@ -39,8 +39,16 @@ def show(kind, data):
               file=sys.stderr)
 
 
+# Plain text, not JSON: asked for JSON, gpt-oss switches to its constrained
+# JSON channel, which llama.cpp's parser rejects with HTTP 500.
+VERDICT = re.compile(r"VERDICT:\W*(ignore|watch|attention)\W*(.*)", re.I)
+
+
 def parse_verdict(answer):
     for line in reversed(answer.strip().splitlines()):
+        m = VERDICT.search(line)
+        if m:
+            return m.group(1).lower(), m.group(2).strip()
         m = re.search(r"\{.*\}", line)
         if m:
             try:

@@ -5,6 +5,7 @@ Stdlib only, so it runs on any box with python3 and nothing installed.
 
 import json
 import os
+import urllib.error
 import urllib.request
 
 DEFAULT_URL = os.environ.get("ARGUS_LLM_URL", "http://framework:8081/v1")
@@ -28,6 +29,10 @@ class LLM:
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            raw = json.load(resp)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw = json.load(resp)
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"LLM server: HTTP {e.code}: "
+                               f"{e.read().decode(errors='replace')[:500]}") from None
         return raw["choices"][0]["message"], raw.get("usage", {}), raw
