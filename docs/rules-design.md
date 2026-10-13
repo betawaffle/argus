@@ -50,6 +50,13 @@ things later.
 - **Overlaps: the older rule always wins** at dispatch.
 - **The LLM hands back rules through a `propose_rule` tool call**, and
   validation errors come back as the tool's result.
+- **Rules must not be too broad.** A rule that matches all or nearly all
+  lines (from its source, or overall) is rejected or flagged. Measure this by
+  replaying it against a recent journal window.
+- **Rules are scoped to a source** in general. Exactly what counts as a
+  source is still open (see 3).
+- **No approval needed for new rules**, but the page lists *all* rules, not
+  only flagged ones.
 - **Every rule keeps a hit counter and last-hit time**, separately from its
   action, even for `ignore`. This is metadata, not the action's state. It
   lets us find dead rules and see what's noisy.
@@ -138,7 +145,7 @@ Some unmatched things are huge, e.g. an installer's file listing logged
 line by line (3,259 lines in one session on the box). Proposal: keep the
 first N lines (e.g. 200) plus a total count per rule.
 
-### 6. The review flow
+### 6. The review flow (decided: no approval by default, page shows all rules)
 
 On the page: list rules flagged for review, with sample lines. Actions:
 approve, edit (regex, action), or reject with a note. A rejected rule goes
@@ -150,7 +157,7 @@ new rule at first, until we trust it?
 Still open: one file per rule (clean diffs, easy per-rule history) or one
 file per source?
 
-### 8. Multi-line events
+### 8. Multi-line events and noisy sources (needs several ideas)
 
 Tracebacks, boot sequences and table dumps span many lines. One option is a
 `window` action: "collect the next lines from this source for N seconds and
