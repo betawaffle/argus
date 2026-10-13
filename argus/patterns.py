@@ -51,9 +51,24 @@ def read_journal(host="local", since="-1d", cursor=None, max_priority=4):
 TRANSIENT_SCOPE = re.compile(r"^run-p\d+-i\d+\.scope$")
 
 
+# podman logs everything a container prints at priority err, so for container
+# output the priority means nothing. Keep only lines that look like trouble.
+CONTAINER_TROUBLE = re.compile(
+    r"error|exception|traceback|fail|fatal|panic|oom|out of memory|killed|"
+    r"denied|refused|timed? ?out|segfault|corrupt", re.I)
+
+
+def interesting(entry):
+    if "CONTAINER_NAME" in entry:
+        return bool(CONTAINER_TROUBLE.search(message_text(entry)))
+    return True
+
+
 def ident(entry):
     # User services all share _SYSTEMD_UNIT=user@UID.service; the user unit
     # says which one it really is.
+    if "CONTAINER_NAME" in entry:
+        return "container:" + entry["CONTAINER_NAME"]
     unit = entry.get("_SYSTEMD_USER_UNIT") or entry.get("_SYSTEMD_UNIT")
     if unit and TRANSIENT_SCOPE.match(unit):  # systemd-run: new name every run
         unit = "run-<N>.scope"
@@ -100,7 +115,7 @@ class Store:
                 self.db.execute("INSERT OR REPLACE INTO cursors VALUES (?,?)",
                                 (host, e["__CURSOR"]))
             msg = message_text(e)
-            if not msg:
+            if not msg or not interesting(e):
                 continue
             ts = int(e.get("__REALTIME_TIMESTAMP", time.time() * 1e6)) / 1e6
             day = time.strftime("%Y-%m-%d", time.localtime(ts))
