@@ -4,52 +4,14 @@ Stdlib http.server, one table, no JavaScript. Feedback is stored with the
 finding and shown to the model the next time the same service comes up.
 """
 
-import html
-import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from . import rules_page
 from .patterns import Store
+from .serve_util import esc, page, when
 
 ORDER = "CASE f.verdict WHEN 'attention' THEN 0 WHEN 'watch' THEN 1 WHEN '?' THEN 2 ELSE 3 END"
-
-STYLE = """
-:root { --bg:#fff; --fg:#1b1b1b; --muted:#6b6b6b; --line:#e3e3e3;
-        --attention:#c0392b; --watch:#b9770e; --ignore:#5f7d5f; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#161616; --fg:#e8e8e8; --muted:#9a9a9a; --line:#333;
-          --attention:#ff7b6b; --watch:#f2b84b; --ignore:#8fb98f; } }
-body { background:var(--bg); color:var(--fg); margin:0 auto; max-width:1100px;
-       padding:16px; font:14px/1.45 system-ui, sans-serif; }
-table { border-collapse:collapse; width:100%; }
-td, th { border-bottom:1px solid var(--line); padding:6px 8px; text-align:left;
-         vertical-align:top; }
-th { color:var(--muted); font-weight:500; }
-code, pre { font:12px/1.4 ui-monospace, monospace; }
-pre { white-space:pre-wrap; border:1px solid var(--line); padding:8px; }
-.attention { color:var(--attention); font-weight:600; }
-.watch { color:var(--watch); font-weight:600; }
-.ignore, .baseline { color:var(--ignore); }
-.muted { color:var(--muted); }
-a { color:inherit; }
-form { display:inline; }
-button { font:inherit; padding:2px 8px; }
-nav a { margin-right:12px; }
-"""
-
-
-def page(title, body):
-    return (f"<!doctype html><meta charset=utf-8><meta name=viewport "
-            f"content='width=device-width,initial-scale=1'><title>{title}</title>"
-            f"<style>{STYLE}</style><h1>argus</h1>{body}").encode()
-
-
-def esc(x):
-    return html.escape(str(x if x is not None else ""))
-
-
-def when(t):
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) if t else ""
 
 
 def feedback_form(fid, current):
@@ -76,11 +38,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(self.index(show_all="all" in q))
         if url.path.startswith("/f/"):
             return self.send(self.detail(int(url.path[3:])))
+        if url.path == "/rules":
+            return self.send(rules_page.rules_index(self.store.db))
+        if url.path.startswith("/rules/"):
+            name = urllib.parse.unquote(url.path[len("/rules/"):])
+            return self.send(rules_page.rule_detail(self.store.db, name))
         self.send(page("not found", "<p>Not found.</p>"), 404)
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         form = urllib.parse.parse_qs(self.rfile.read(n).decode())
+        if self.path == "/ack":
+            rules_page.ack(self.store.db, int(form["id"][0]))
+            self.send_response(303)
+            self.send_header("Location", self.headers.get("Referer") or "/rules")
+            self.end_headers()
+            return
         fid = int(form["id"][0])
         value = form.get("value", [""])[0]
         note = form.get("note", [None])[0]
@@ -105,8 +78,9 @@ class Handler(BaseHTTPRequestHandler):
             ORDER BY {ORDER}, f.t DESC""").fetchall()
         counts = dict(self.store.db.execute(
             "SELECT verdict, count(*) FROM findings GROUP BY verdict").fetchall())
-        nav = (f"<nav><a href=/>open findings</a><a href=/?all>everything</a>"
-               f"<span class=muted>" + ", ".join(f"{v}: {c}" for v, c in sorted(counts.items()))
+        nav = ("<nav><a href=/>open findings</a><a href=/?all>everything</a>"
+               "<a href=/rules>rules</a>"
+               "<span class=muted>" + ", ".join(f"{v}: {c}" for v, c in sorted(counts.items()))
                + "</span></nav>")
         body = "".join(
             f"<tr><td class={esc(v)}>{esc(v)}</td>"

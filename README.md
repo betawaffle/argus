@@ -21,6 +21,16 @@ Stdlib-only Python 3; nothing to install.
   (numbers, IPs, UUIDs stripped) and keeps counts in SQLite, so only new or
   spiking patterns reach the model.
 
+## Rule engine (in progress)
+
+The next version learns rules instead of templates: when no rule matches a
+line, the model writes one (a regex plus actions built from building blocks),
+and argus validates it and keeps it in a git repo of TOML files. Known lines
+are then handled without the model. See [docs/rules-design.md](docs/rules-design.md).
+
+    python3 -m argus rules run      # one batch: dispatch new lines, learn rules
+    python3 -m argus rules list     # rules and hit counts; also /rules on the page
+
 ## Use
 
     python3 -m argus ask "is anything wrong with the zpool?"

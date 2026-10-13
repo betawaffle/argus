@@ -4,6 +4,8 @@
   python -m argus scan --baseline                 learn current patterns, no model
   python -m argus scan [--host moneta]            investigate new or spiking patterns
   python -m argus serve [--port 8082]             page to browse findings and give feedback
+  python -m argus rules run [--learn 10]          rule engine: dispatch new lines, learn rules
+  python -m argus rules list                      show the rules and their hit counts
 """
 
 import argparse
@@ -12,7 +14,7 @@ import re
 import sys
 import time
 
-from . import serve
+from . import engine, serve
 from .agent import DATA_DIR, Agent
 from .patterns import Store, read_journal
 
@@ -102,6 +104,25 @@ def cmd_scan(args):
         print(f"  -> {verdict}: {summary}")
 
 
+def cmd_rules_list(args):
+    import sqlite3
+    from .rules import RuleSet
+    rs = RuleSet()
+    db = sqlite3.connect(DATA_DIR / "argus.db")
+    try:
+        stats = {r[0]: r[1:] for r in db.execute(
+            "SELECT rule, hits, last_hit FROM rule_stats")}
+    except sqlite3.OperationalError:
+        stats = {}
+    for src, rules in sorted(rs.by_source.items()):
+        print(src)
+        for r in rules:
+            hits, last = stats.get(r["name"], (0, None))
+            flag = "  FLAGGED: " + r.get("review", "") if r.get("flagged") else ""
+            acts = ",".join(a.get("block", "?") for a in r.get("actions", []))
+            print(f"  {r['name']:<40} {hits:>7} hits  [{acts}]{flag}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="argus")
     sub = ap.add_subparsers(required=True)
@@ -121,6 +142,19 @@ def main():
     v.add_argument("--port", type=int, default=8082)
     v.add_argument("--bind", default="0.0.0.0")
     v.set_defaults(func=lambda a: serve.serve(DATA_DIR / "argus.db", a.bind, a.port))
+    r = sub.add_parser("rules").add_subparsers(required=True)
+    rr = r.add_parser("run", help="one batch: dispatch new lines, learn rules")
+    rr.add_argument("--host", default="local")
+    rr.add_argument("--learn", type=int, default=10,
+                    help="max rules to learn this run (each is one model call)")
+    rr.add_argument("--investigate", type=int, default=3,
+                    help="max queued investigations to run")
+    rr.add_argument("--since", help="testing only: process lines since this time "
+                    "(e.g. -2h) instead of resuming from the saved cursor. Use "
+                    "with scratch ARGUS_DATA and ARGUS_RULES.")
+    rr.set_defaults(func=engine.main)
+    rl = r.add_parser("list", help="show rules with hit counts")
+    rl.set_defaults(func=cmd_rules_list)
     args = ap.parse_args()
     args.func(args)
 

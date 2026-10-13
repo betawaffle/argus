@@ -60,6 +60,12 @@ things later.
 - **Every rule keeps a hit counter and last-hit time**, separately from its
   action, even for `ignore`. This is metadata, not the action's state. It
   lets us find dead rules and see what's noisy.
+- **Rule files are TOML**, in their own local git repo on the box
+  (`~/work/argus-rules`, not on GitHub).
+- **Read every priority level.** Audit entries have no priority at all.
+- **Build order:** the normal path first (new lines only), then backfill
+  as a trial run before it goes live. If backfill shows problems, rework
+  and restart from scratch. The old daily scan keeps running until then.
 - **Backfill** (the first run over existing history) needs extra machinery
   and probably a different strategy for the LLM part. It's handled
   separately from the steady state.

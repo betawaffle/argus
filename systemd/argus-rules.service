@@ -1,0 +1,8 @@
+[Unit]
+Description=argus rule engine batch
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/argus
+ExecStart=/usr/bin/python3 -m argus rules run --learn 10
+Environment=PYTHONUNBUFFERED=1
