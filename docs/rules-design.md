@@ -64,6 +64,35 @@ things later.
   and probably a different strategy for the LLM part. It's handled
   separately from the steady state.
 
+## Proposals under discussion (Andy's ideas, 2026-10-13; not decided)
+
+- **Actions get the full journal event.** Every field goes in, with the regex
+  groups merged on top, so `extract` can take `AUDIT_FIELD_ADDR` just as
+  easily as a regex group. The LLM also sees full events when writing a
+  rule, so it can choose `MESSAGE_ID` / `CODE_FILE` matches over a regex.
+- **Rules match on any fields, with minimum specificity.** A rule must name
+  a `_TRANSPORT` plus at least one trusted field that identifies the source.
+  Which field depends on the transport:
+  - journal/stdout/syslog: `_SYSTEMD_UNIT` / `_SYSTEMD_USER_UNIT` / `_EXE`
+  - audit: `_AUDIT_TYPE_NAME`
+  - kernel: 61% of entries have no subsystem, so a non-trivial `MESSAGE`
+    regex is required instead
+  Sender-set fields (`MESSAGE_ID`, `CODE_FILE`, ...) may narrow a match, but
+  can't serve as the identity.
+- **Volatile fields can't be matched on.** These are fields that would go
+  stale: PIDs, boot/stream/invocation/job IDs, cursors, timestamps, random
+  container names, transient scope names. Rather than a hand-made list,
+  measure it: a field whose distinct-values-to-occurrences ratio is near 1
+  is volatile. `journal-fields.md` has the counts, and the check adapts per
+  host.
+- **Different code paths per transport:**
+  - **stdout:** group lines into bursts by `_STREAM_ID` and timing *before*
+    matching. This is where multi-line output and noise get handled.
+  - **audit:** almost all field rules, no regex.
+  - **kernel:** treat boot-time output (low monotonic timestamp) as its own
+    phase, since that's where most kernel noise is.
+  - **journal (native):** try `MESSAGE_ID` and `CODE_FILE:CODE_LINE` first.
+
 ## Open questions
 
 ### 1. Building blocks
