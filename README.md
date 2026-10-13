@@ -6,6 +6,8 @@ ideas. Its first job is watching unattended machines' logs.
 
 Stdlib-only Python 3; nothing to install.
 
+**[How it works](docs/how-it-works.md)** covers the design, the details and what we learned from the first runs.
+
 ## Pieces
 
 - `argus/llm.py`: client for an OpenAI-compatible endpoint
