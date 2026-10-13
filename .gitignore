@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# Run data (logs, transcripts, the pattern DB) lives in ~/.local/share/argus,
+# never in the repo. These guard against copies landing here by accident.
+*.db
+*.jsonl
+transcripts/
