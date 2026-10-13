@@ -43,41 +43,67 @@ things later.
   - The worst case is that we can't get a working regex at all. Then the rule
     is the escaped line itself, matching only identical lines. Timestamps and
     similar varying parts will need some care.
-- **State lives in SQLite**, unless we hit something it can't do.
+- **Rules live in git** (a repo on the box), so every rule the LLM writes or
+  changes is a reviewable, revertable diff. **Runtime state lives in SQLite**:
+  counters, extracted values, collected lines, review flags. Lines and
+  extracts never go in git.
+- **Overlaps: the older rule always wins** at dispatch.
+- **The LLM hands back rules through a `propose_rule` tool call**, and
+  validation errors come back as the tool's result.
+- **Every rule keeps a hit counter and last-hit time**, separately from its
+  action, even for `ignore`. This is metadata, not the action's state. It
+  lets us find dead rules and see what's noisy.
 - **Backfill** (the first run over existing history) needs extra machinery
   and probably a different strategy for the LLM part. It's handled
   separately from the steady state.
 
 ## Open questions
 
-### 1. The first set of building blocks
+### 1. Building blocks
 
-A starting proposal:
+Andy's descriptions of the first set:
 
 | block | what it does |
 |---|---|
-| `ignore` | do nothing (the rule's hit counter still counts) |
-| `count(window)` | count matches per window (hour/day) |
-| `threshold(n, window, then)` | when the count in a window reaches n, run `then` |
-| `extract(table)` | store the named groups as a row in a per-rule table, with the timestamp |
-| `flag(severity, summary)` | create a finding on the page (`watch` / `attention`) |
-| `collect` | keep the full lines (the review default) |
-| `investigate` | run the current agent investigation with these lines as context |
+| `ignore` | drop the line: no count, nothing collected (only the rule's own hit counter) |
+| `count(window)` | keep a counter per window (hour/day), plus simple stats such as first/last seen and peak rate |
+| `threshold(n, window, then)` | when there are n lines in a window, run `then` *in addition to* counting |
+| `extract(...)` | do something with the named groups: store them as a row, or feed one of the blocks below |
+| `flag(severity, summary)` | mark the rule so it shows up on the page as needing attention |
+| `collect` | keep the matching lines, by journal cursor or by copying (see 5) |
+| `investigate` | hand the lines to the LLM, which writes a report with recommendations for Andy (details to work out) |
 
-Actions compose as a list, e.g. `[extract, threshold(5, day, flag(watch))]`.
-What's missing? What would you want `then` to be able to do?
+More suggestions, many of which build on `extract`:
 
-### 2. Overlapping rules
+| block | what it does | example |
+|---|---|---|
+| `expect_every(period)` | a heartbeat: flag if the line *stops* appearing. On unattended machines, silence is often the real problem. | "zfs scrub finished" weekly; backup completed nightly; the sanoid/syncoid snapshot line hourly |
+| `track(field)` | remember the latest value of a field and fire when it changes | pool state `ONLINE` → `DEGRADED`; a link going down/up; the kernel version at boot |
+| `series(field)` | store a numeric field over time and fire when it crosses a limit or keeps rising | SMART reallocated sectors, temperatures, a backup's bytes or duration |
+| `pair(start_rule, end_rule, within)` | match start/end lines: record the duration, and flag if the end never comes | a backup job started/finished; a long gpu-run starting and exiting |
+| `rate_change` | learn the usual rate and fire when it's well above (or below) normal | auth failures, OOM kills, tailscale retries |
+| `distinct(field)` | track the set of values seen and fire on a new one | a new USB device, a new IP failing SSH auth, a new container name |
+| `run_check(command)` | run one allowlisted read-only command and attach its output to whatever fires next | `zpool status` when a ZFS error line appears; `smartctl -H` on an I/O error |
+| `digest` | roll matches into a periodic summary instead of one item each | "47 tailscale DNS retries today" |
 
-Name uniqueness doesn't stop two *regexes* from matching the same line.
-Options:
-- At creation, test the new regex against the stored sample lines of every
-  other rule from the same source. Treat an overlap like a name conflict:
-  give the LLM both rules and ask it to merge or narrow them.
-- At dispatch, first match wins, in creation order (older rules win).
+Actions compose as a list, e.g.
+`[extract, series(realloc, rising → flag(attention))]` or
+`[count(day), threshold(5, day, investigate)]`.
 
-Proposal: both. Check at creation, and use first-match-wins as the
-tiebreaker.
+**`then` / what fires:** `flag`, `investigate`, `run_check` then `flag`, and
+later `notify`.
+
+### 2. Detecting overlapping regexes
+
+Decided: the older rule wins at dispatch. Detecting overlaps is an extra.
+
+In general it's hard. For pure regular expressions, "can these two match the
+same text?" is answerable by intersecting their automata. Python regexes have
+backreferences and lookarounds, which break that, and no stdlib tool does it.
+The practical version: when a rule is created, run it against the stored
+sample lines of every other rule (and the reverse). That catches real
+overlaps on real data, which is what matters. It misses lines nobody has
+seen yet, but the older-wins rule covers those.
 
 ### 3. What a regex matches against
 
@@ -86,7 +112,7 @@ unit or syslog identifier) as a separate field of the rule. Dispatch looks
 up the rules for a line's source first, then the source-less rules, which
 keeps it fast. Priority could be another optional filter.
 
-### 4. How the LLM hands back a rule
+### 4. How the LLM hands back a rule (decided: tool call)
 
 Asking gpt-oss for JSON in plain text breaks llama.cpp (HTTP 500, see
 how-it-works.md). Tool calls work reliably, though, so the model would
@@ -100,6 +126,10 @@ exists.
 
 ### 5. Collecting lines until review
 
+By reference (a journal cursor) is cheapest, but the journal gets rotated
+and vacuumed, so references go stale, probably within weeks. Proposal:
+store the cursor and also copy the line text for the first N lines.
+
 Some unmatched things are huge, e.g. an installer's file listing logged
 line by line (3,259 lines in one session on the box). Proposal: keep the
 first N lines (e.g. 200) plus a total count per rule.
@@ -111,12 +141,10 @@ approve, edit (regex, action), or reject with a note. A rejected rule goes
 back to the LLM with the note. Should approval also be required for every
 new rule at first, until we trust it?
 
-### 7. Where rules are stored
+### 7. Where rules are stored (decided: git for rules, SQLite for state)
 
-- In SQLite with everything else, or
-- as files (one per rule, or a single rules file) in a git repo on the box,
-  so every change the LLM makes is a reviewable diff, with history and
-  revert for free.
+Still open: one file per rule (clean diffs, easy per-rule history) or one
+file per source?
 
 ### 8. Multi-line events
 
