@@ -126,9 +126,13 @@ exists.
 
 ### 5. Collecting lines until review
 
-By reference (a journal cursor) is cheapest, but the journal gets rotated
-and vacuumed, so references go stale, probably within weeks. Proposal:
-store the cursor and also copy the line text for the first N lines.
+By reference (a journal cursor) is cheapest. On the box, journald uses the
+defaults: persistent storage, capped at 10% of the filesystem (max 4 GB),
+and no time limit. At about 24 MB/day that's roughly 5 months before the
+oldest lines rotate out. So references are safe for weeks. Proposal: store
+cursors, and copy the line text into SQLite once a rule is flagged or
+investigated, so the evidence survives rotation. moneta will have its own
+retention settings, so check per host.
 
 Some unmatched things are huge, e.g. an installer's file listing logged
 line by line (3,259 lines in one session on the box). Proposal: keep the
