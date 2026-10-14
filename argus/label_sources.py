@@ -23,6 +23,8 @@ from .blocks import State
 from .rules import RuleSet, _toml_value
 
 SEVERITY_PRIORITY = {"attention": 3, "watch": 2, "?": 1}
+# Alert and investigation ids start over when the rule engine is reset, so
+# their keys carry the time too: a new alert 1 is not the old alert 1.
 
 
 def _shape(text):
@@ -126,7 +128,7 @@ class Reports(Source, _DB):
                 evs = []
             last = (report or "").strip().splitlines()[-1:] or [""]
             yield Item(
-                source=self.name, key=f"investigation:{iid}",
+                source=self.name, key=f"investigation:{iid}@{int(t or 0)}",
                 title=f"{rule}: {last[0][:120]}",
                 parts=paragraphs(report),
                 context=[Part("events", "code", _events_text(evs), "events it looked at")],
@@ -147,7 +149,7 @@ class Alerts(Source, _DB):
             data = _json(data, None)
             event = _json(event, None)
             yield Item(
-                source=self.name, key=f"alert:{aid}",
+                source=self.name, key=f"alert:{aid}@{int(t or 0)}",
                 title=f"{severity}: {summary}",
                 parts=[Part("summary", "text", summary or "", "alert"),
                        Part("severity", "field", severity or "", "severity")],
