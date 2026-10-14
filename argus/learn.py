@@ -66,6 +66,9 @@ How to choose actions:
   (DHCP leases, NAT endpoints, ports) are watch at most, or just track
 - distinct and track need a field that repeats (a unit, user, device), not
   one that differs on every line (timestamps, uptimes, counters, ports)
+- lines that only come right after boot arrive as one burst per boot: no
+  threshold on them (it would alert on every reboot)
+- output of the owner's experiment jobs (run.scope/container) never alerts
 Use the run tool to check the machine if that helps you judge.
 
 Call propose_rule when ready. If it reports problems, fix them and call it

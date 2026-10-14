@@ -6,7 +6,7 @@ and learn rules for whatever nothing matched.
 Flow of one run:
 1. Read events after the saved cursor. The first run only records the
    current end of the journal: watching starts from "now". Backfill of older
-   history is a separate step.
+   history is a separate step (`rules backfill`, see Engine.backfill).
 2. Each event goes to its source's rules; the first match wins and its
    actions run. Flagged rules also collect their lines until reviewed.
    Unit-stdout copies of container lines are skipped (see
@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS runs (
     learned INTEGER, pending INTEGER, seconds REAL);
 """
 PENDING_PER_GROUP = 20   # events kept per pending group; enough to learn from
+PENDING_DAYS = 1         # a pending shape not seen again for this long is dropped
 SOURCE_LINES = 50000     # lines kept per source per batch for rule checks
 # The unit serving the model. Its unmatched lines written while argus's own
 # requests ran are argus talking to itself and are never learned from.
@@ -73,6 +74,7 @@ class Engine:
         self.learner = Learner(self.rules, llm=llm)
         self.log = log
         self.new_rules = set()   # learned this run: their first lines are a baseline
+        self.backfilling = False  # replaying history: all of it is baseline
 
     # --- cursor ---------------------------------------------------------------
     def cursor(self):
@@ -95,7 +97,7 @@ class Engine:
         self.state.hit(rule["name"], t)
         self.state.keep_example(rule["name"], event, t)
         ctx = {"rule": rule["name"], "event": event, "groups": groups,
-               "t": t, "state": self.state, "quiet": rule["name"] in self.new_rules}
+               "t": t, "state": self.state, "quiet": self.backfilling or rule["name"] in self.new_rules}
         actions = rule.get("actions", [])
         if rule.get("flagged") and not any(a.get("block") == "collect" for a in actions):
             actions = actions + [{"block": "collect"}]
@@ -115,7 +117,7 @@ class Engine:
             return
         groups = defaultdict(list)   # (source, shape) -> events
         n = matched = mirrored = own = 0
-        self._own = llm_requests(time.time() - 3 * 86400)
+        self._own = llm_requests(0 if self.backfilling else time.time() - 3 * 86400)
         for e in self._pending():
             self._sort(e, groups)
         source_lines = defaultdict(list)   # this batch's lines per source, for checks
@@ -185,14 +187,39 @@ class Engine:
                     del groups[key]
             self.db.commit()
 
-        self._save_pending(groups)
-        prune_requests(time.time() - 3 * 86400)
+        dropped = self._save_pending(groups, t_last)
+        if dropped:
+            self.log(f"dropped {dropped} pending shapes not seen in {PENDING_DAYS} day(s)")
+        if not self.backfilling:
+            prune_requests(time.time() - 3 * 86400)
         self.db.execute(
             "INSERT INTO runs (t, host, events, matched, learned, pending, seconds) "
             "VALUES (?,?,?,?,?,?,?)",
             (t0, self.host, n, matched, learned, sum(map(len, groups.values())),
              round(time.time() - t0, 1)))
         self.db.commit()
+        self.investigate(investigate_limit)
+
+    def backfill(self, windows, learn_limit=40, investigate_limit=3):
+        """The first run over existing history: one batch per window, oldest
+        first, then watching continues from the end of the last one.
+
+        Each window is a normal batch (learning, pending carried to the
+        next), so memory stays bounded by one window and thresholds are
+        judged against a window's worth of lines. All of it is baseline:
+        distinct and track record values but don't alert. Thresholds still
+        fire, so the alerts show what the rules would have said.
+        Investigations wait until the end."""
+        if self.cursor() is not None or self.db.execute(
+                "SELECT count(*) FROM learned").fetchone()[0]:
+            raise SystemExit("backfill needs a fresh start: run `rules reset` first")
+        self.backfilling = True
+        try:
+            for label, batch in windows:
+                self.log(f"backfill: {label}")
+                self.run(learn_limit=learn_limit, investigate_limit=0, events_iter=batch)
+        finally:
+            self.backfilling = False
         self.investigate(investigate_limit)
 
     def _is_own(self, src, t):
@@ -218,12 +245,20 @@ class Engine:
         self.db.execute("DELETE FROM pending WHERE host=?", (self.host,))
         return [json.loads(r[0]) for r in rows]
 
-    def _save_pending(self, groups):
+    def _save_pending(self, groups, now=None):
+        """Keep unlearned groups for the next run, except shapes that haven't
+        come back in PENDING_DAYS (one-offs, like a machine's setup day): if
+        they ever do, they're learned then. Returns how many were dropped."""
+        dropped = 0
         for (src, shape), evs in groups.items():
-            for e in evs[:PENDING_PER_GROUP]:
+            if now and max(map(blocks.event_time, evs)) < now - PENDING_DAYS * 86400:
+                dropped += 1
+                continue
+            for e in evs[-PENDING_PER_GROUP:]:   # the latest, for the expiry check
                 self.db.execute(
                     "INSERT INTO pending (host, source, shape, t, event) VALUES (?,?,?,?,?)",
                     (self.host, src, shape, blocks.event_time(e), json.dumps(e)))
+        return dropped
 
     # --- examples ---------------------------------------------------------------
     def keep_examples(self, since, events_iter=None):
@@ -288,10 +323,34 @@ def examples(args):
     print(f"kept {eng.keep_examples(args.since)} example events")
 
 
+def backfill(args):
+    eng = Engine(args.host, log=lambda m: print(m, file=sys.stderr, flush=True))
+    start = events.first_time(args.host)
+    if start is None:
+        raise SystemExit("the journal is empty")
+    step = args.hours * 3600
+
+    def windows():
+        t = start
+        while True:
+            end = t + step
+            last = end >= time.time()
+            label = (time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) + " to "
+                     + ("now" if last else time.strftime("%Y-%m-%d %H:%M",
+                                                         time.localtime(end))))
+            yield label, events.window(args.host, t, None if last else end)
+            if last:
+                return
+            t = end
+
+    eng.backfill(windows(), learn_limit=args.learn, investigate_limit=args.investigate)
+
+
 def import_requests(args):
     """Record past model traffic from transcripts (see llm.import_transcripts)."""
     from .llm import import_transcripts
-    n = import_transcripts(DATA_DIR / "transcripts", time.time() - 3 * 86400)
+    since = 0 if args.all else time.time() - 3 * 86400
+    n = import_transcripts(DATA_DIR / "transcripts", since)
     print(f"{n} request windows recorded from transcripts")
 
 
