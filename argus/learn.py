@@ -37,7 +37,9 @@ A rule has:
   {{"_KERNEL_SUBSYSTEM": "usb"}}. Only these fields: {", ".join(sorted(MATCHABLE))}.
   Prefer MESSAGE_ID or CODE_FILE + CODE_LINE when the lines have them: exact
   and cheap.
-- regex: Python regex searched in MESSAGE. Use named groups (?P<name>...) for
+- regex: Python regex searched in MESSAGE. A MESSAGE can hold several lines
+  when argus has joined a traceback into one event; then match the
+  exception line, e.g. (?m)^KeyError: (?P<key>.*)$. Use named groups (?P<name>...) for
   the parts that vary (numbers, devices, users, addresses, paths) so actions
   can use them. Keep enough fixed text that it only matches this kind of
   line, not everything from the source.

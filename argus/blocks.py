@@ -7,7 +7,10 @@ block's parameters, e.g.
      {block = "threshold", n = 5, window = "day",
       then = {block = "flag", severity = "watch", summary = "..."}}]
 
-Blocks get the whole event plus the regex's named groups. Their state lives
+Blocks get the whole event plus the regex's named groups. While a rule
+handles the lines of the run it was learned in, ctx["quiet"] is set:
+distinct and track record values without running on_new/on_change, so a new
+rule doesn't call everything it sees first "new". Their state lives
 in SQLite (State below), never in the rules repo.
 """
 
@@ -103,7 +106,8 @@ def _count(p, ctx, key):
 
 def _threshold(p, ctx, key):
     if _bump(ctx, key, p.get("window", "day")) == p["n"]:  # fire once per window
-        run_actions(p["then"], ctx, key + ".then")
+        sub = {**ctx, "groups": {**ctx["groups"], "n": p["n"]}}
+        run_actions(p["then"], sub, key + ".then")
 
 
 def _extract(p, ctx, key):
@@ -175,7 +179,7 @@ def _track(p, ctx, key):
                      (rule, p["field"])).fetchone()
     db.execute("INSERT OR REPLACE INTO tracked VALUES (?,?,?,?)",
                (rule, p["field"], str(value), ctx["t"]))
-    if row and row[0] != str(value) and "on_change" in p:
+    if row and row[0] != str(value) and "on_change" in p and not ctx.get("quiet"):
         sub = {**ctx, "groups": {**ctx["groups"], "old": row[0], "new": str(value)}}
         run_actions(p["on_change"], sub, key + ".on_change")
 
@@ -187,7 +191,7 @@ def _distinct(p, ctx, key):
     cur = ctx["state"].db.execute(
         "INSERT OR IGNORE INTO distinct_values VALUES (?,?,?,?)",
         (ctx["rule"], p["field"], str(value), ctx["t"]))
-    if cur.rowcount and "on_new" in p:
+    if cur.rowcount and "on_new" in p and not ctx.get("quiet"):
         sub = {**ctx, "groups": {**ctx["groups"], "new": str(value)}}
         run_actions(p["on_new"], sub, key + ".on_new")
 
@@ -200,7 +204,8 @@ BLOCKS = {
     "threshold": (_threshold, {"n": (int, True), "window": (str, False),
                                "then": (object, True)},
                   "When the n-th match in a window arrives, run `then` "
-                  "(a block or list of blocks). Fires once per window."),
+                  "(a block or list of blocks). Fires once per window. "
+                  "{n} available to flag."),
     "extract": (_extract, {"fields": (list, False)},
                 "Store the regex's named groups (plus any listed event fields) "
                 "as a row, for later analysis."),
