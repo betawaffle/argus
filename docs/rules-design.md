@@ -414,3 +414,17 @@ import-requests` recovers request windows for the last 3 days from the agent
 transcripts (a transcript that ends without an answer, i.e. a failed request,
 gets 15 extra minutes, since that's when the dump is written), so a reset and
 re-run doesn't learn it again.
+
+## Trial run 8 (2026-10-14)
+
+After `reset` and `import-requests`: 33,445 lines, 15,329 skipped as argus's
+own model traffic, 13 rules learned (all accepted), nothing pending, 0
+alerts, **3 m 52 s**. A follow-up 11-minute batch took 0.13 s. No rule came
+from model output.
+
+Known gap: the request windows covered 83% of those 6 hours because trials
+ran nearly nonstop, so llm-server's ordinary lines (slots, timings, proxying)
+were skipped too and will be learned later, when the model serves someone
+else while argus is idle. In steady state, other people's model traffic
+during an argus request isn't learned from. Narrowing the skip to argus's own
+llama-server slot or task would fix that if it matters.
