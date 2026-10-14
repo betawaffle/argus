@@ -469,3 +469,25 @@ learned from model output. What went wrong:
   (gpu-run jobs; `ARGUS_OWNER_SOURCES`) gets no alerting blocks.
 - Left as is: rules about the Claude remote-control service's own output
   (ignore/count rules are cheap), and 29 kernel rules from boot lines.
+
+## Backfill trial 2 (2026-10-14)
+
+After those fixes, from scratch: 101,176 events, 107 rules learned (97
+accepted, 10 fallbacks; 99 remain), 1h01m (was 1h29m), peak memory 259 MB.
+The second window dropped 4,717 one-off shapes, the last window had 165
+unmatched groups (was 5,087), and **nothing was left pending** (was 4,083
+shapes). **1 alert** (was 8). The next normal batch took 0.24 seconds with
+nothing to learn.
+
+The new checks rejected one proposal (an open-webui rule matching on
+`SYSLOG_IDENTIFIER`); the model dropped the field and the retry was
+accepted. The boot lines never got rules: seen once, they expired.
+
+Still open:
+- gpu-run output is ignored outright (matched on podman's `CODE_FILE`), so
+  an experiment's OOM or traceback would be ignored too.
+- argus learns the old scanner's output (argus-scan.service, 7 rules). That
+  goes away when the scanner is retired at go-live.
+- Near-duplicate tailscaled rules (14); four proposals rejected for overlap.
+- conmon's missing-dbus message in the claude-rc container alerts as
+  attention; it's expected there.
