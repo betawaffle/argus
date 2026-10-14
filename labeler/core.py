@@ -385,19 +385,27 @@ class Store:
     def carry_forward(self):
         """Move labels onto new versions of items when nothing that was judged
         changed: the parts are identical and no mark points at changed text
-        (only context changed, e.g. a new example or a moved hit count)."""
+        (only context changed, e.g. a new example or a moved hit count).
+        A plain skip on the new version (no marks, links or note) is not a
+        judgment, so a carried label replaces it (once: skipping a carried
+        label sticks)."""
         rows = self.db.execute("""
             SELECT DISTINCT cur.id, l.by FROM items cur
             JOIN items old ON old.source = cur.source AND old.key = cur.key
                           AND old.id != cur.id
             JOIN labels l ON l.item_id = old.id
-            WHERE cur.current = 1 AND NOT EXISTS (
-                SELECT 1 FROM labels x WHERE x.item_id = cur.id AND x.by = l.by)
-            """).fetchall()
+            WHERE cur.current = 1""").fetchall()
         n = 0
         for item_id, by in rows:
+            mine = self.latest_label(item_id, by)
+            if mine is not None and not self._plain_skip(mine):
+                continue
+            if self.db.execute("SELECT 1 FROM labels WHERE item_id=? AND by=? "
+                               "AND carried_from IS NOT NULL", (item_id, by)).fetchone():
+                continue  # carried once already; a later skip is deliberate
             label, dropped, changed = self.carried_label(item_id, by)
-            if label is None or dropped or not changed["parts_same"]:
+            if (label is None or dropped or not changed["parts_same"]
+                    or self._plain_skip(label)):
                 continue
             self.save_label(item_id, by, label["verdict"], label["marks"],
                             fixable=label["fixable"], confidence=label["confidence"],
@@ -405,6 +413,11 @@ class Store:
                             carried_from=changed["from"])
             n += 1
         return n
+
+    @staticmethod
+    def _plain_skip(label):
+        return (label["verdict"] == "skip" and not label["marks"]
+                and not label["links"] and not label["note"])
 
     def previous_label(self, item_id, by):
         """The latest label on an older version of the same item, if any."""
