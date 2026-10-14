@@ -8,7 +8,7 @@ from .engine import SCHEMA as ENGINE_SCHEMA
 from .rules import RuleSet, dump_rules
 from .serve_util import esc, page, when
 
-NAV = "<nav><a href=/>findings</a><a href=/rules>rules</a></nav>"
+NAV = "<nav><a href=/>findings</a><a href=/rules>rules</a><a href=/label>label</a></nav>"
 
 
 def _q(name):
