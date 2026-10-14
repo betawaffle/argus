@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS runs (
     learned INTEGER, pending INTEGER, seconds REAL);
 """
 PENDING_PER_GROUP = 20   # events kept per pending group; enough to learn from
+PENDING_DAYS = 1         # a pending shape not seen again for this long is dropped
 SOURCE_LINES = 50000     # lines kept per source per batch for rule checks
 # The unit serving the model. Its unmatched lines written while argus's own
 # requests ran are argus talking to itself and are never learned from.
@@ -186,7 +187,9 @@ class Engine:
                     del groups[key]
             self.db.commit()
 
-        self._save_pending(groups)
+        dropped = self._save_pending(groups, t_last)
+        if dropped:
+            self.log(f"dropped {dropped} pending shapes not seen in {PENDING_DAYS} day(s)")
         if not self.backfilling:
             prune_requests(time.time() - 3 * 86400)
         self.db.execute(
@@ -242,12 +245,20 @@ class Engine:
         self.db.execute("DELETE FROM pending WHERE host=?", (self.host,))
         return [json.loads(r[0]) for r in rows]
 
-    def _save_pending(self, groups):
+    def _save_pending(self, groups, now=None):
+        """Keep unlearned groups for the next run, except shapes that haven't
+        come back in PENDING_DAYS (one-offs, like a machine's setup day): if
+        they ever do, they're learned then. Returns how many were dropped."""
+        dropped = 0
         for (src, shape), evs in groups.items():
-            for e in evs[:PENDING_PER_GROUP]:
+            if now and max(map(blocks.event_time, evs)) < now - PENDING_DAYS * 86400:
+                dropped += 1
+                continue
+            for e in evs[-PENDING_PER_GROUP:]:   # the latest, for the expiry check
                 self.db.execute(
                     "INSERT INTO pending (host, source, shape, t, event) VALUES (?,?,?,?,?)",
                     (self.host, src, shape, blocks.event_time(e), json.dumps(e)))
+        return dropped
 
     # --- examples ---------------------------------------------------------------
     def keep_examples(self, since, events_iter=None):

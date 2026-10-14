@@ -36,6 +36,11 @@ MIN_LITERAL = 6        # literal characters a regex needs when nothing else narr
 FALLBACK_KEEP = 20     # matching lines a fallback keeps so a human can see them
 MAX_TEMPLATES = 20     # shapes a rule may cover before it's flagged for review
 TOO_BROAD = 0.95       # share of a source's shapes a rule may never cover
+BOOT_SECONDS = 600     # lines this soon after boot are the boot's own burst
+# Sources whose output is the owner's own (experiment jobs started with
+# gpu-run): it's theirs to read, so rules there only ignore/count/extract/collect.
+OWNER_SOURCES = set(os.environ.get("ARGUS_OWNER_SOURCES", "run.scope/container").split())
+ALERTING = {"flag", "threshold", "investigate"}
 MAX_SAMPLES = 5
 
 
@@ -239,6 +244,17 @@ def check(rule, src, ruleset, examples, recent=(), hours=None):
         # All container output is forwarded by the same conmon call, so
         # CODE_FILE/CODE_LINE there say nothing about the line.
         narrowing -= {"CODE_FILE"}
+        if "SYSLOG_IDENTIFIER" in match:
+            p.append("can't match on SYSLOG_IDENTIFIER for container output: podman "
+                     "sets it to the container's name, which is often random per "
+                     "run (e.g. optimistic_buck). The source already names the unit.")
+    if src in OWNER_SOURCES:
+        used = {a.get("block") for a in blocks.walk(rule.get("actions"))}
+        if used & ALERTING or any(a.get("on_new") or a.get("on_change")
+                                  for a in blocks.walk(rule.get("actions"))):
+            p.append(f"{src} is the owner's own experiment output (gpu-run jobs); "
+                     "it's theirs to read, so no alerts here: use only ignore, "
+                     "count, extract or collect.")
     if not narrowing and literal_chars(regex) < MIN_LITERAL:
         p.append(f"too unspecific: the regex needs at least {MIN_LITERAL} literal "
                  "characters unless match uses MESSAGE_ID or CODE_FILE")
@@ -262,6 +278,7 @@ def check(rule, src, ruleset, examples, recent=(), hours=None):
                      f"merge: propose_rule with name={older.name!r}, replace=true and "
                      f"a regex covering both. Older rule: {json.dumps(older.rule)}")
     p += identity_problems(rule, c, examples, recent)
+    p += boot_problems(rule, c, examples, recent)
     if hours:
         p += threshold_problems(rule, c, recent, hours)
     p += broadness_problems(c, src, examples, recent)
@@ -276,6 +293,26 @@ def check(rule, src, ruleset, examples, recent=(), hours=None):
         p.append(f"review: broad, covers {len(shapes)} differently shaped lines "
                  f"from this source, e.g. {sorted(shapes)[:3]}")
     return p
+
+
+def _uptime(e):
+    try:
+        return int(e["__MONOTONIC_TIMESTAMP"]) / 1e6
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def boot_problems(rule, c, examples, recent=()):
+    """Lines that only come in the minutes after boot arrive as one burst per
+    boot, so a threshold on them alerts on every reboot."""
+    if not any(a.get("block") == "threshold" for a in blocks.walk(rule.get("actions"))):
+        return []
+    up = [_uptime(e) for e in [*examples, *recent] if c.test(e) is not None]
+    if not up or None in up or max(up) >= BOOT_SECONDS:
+        return []
+    return [f"these lines only appear in the first {BOOT_SECONDS // 60} minutes "
+            "after boot, as one burst per boot, so a threshold would alert on every "
+            "reboot. Drop the threshold: count or collect them, or ignore them."]
 
 
 def threshold_problems(rule, c, recent, hours):

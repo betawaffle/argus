@@ -445,3 +445,27 @@ don't alert, even for values first seen in a later window. Thresholds still
 fire, so the alerts show what the rules would have said about the past.
 Investigations run once at the end, and the cursor is left at the end of
 the journal, so the timer picks up from there.
+
+## Backfill trial 1 (2026-10-14)
+
+The whole journal (2 days, from the box's setup day): 3 windows, 90,436
+events, 120 rules learned (103 accepted, 17 fallbacks; later rules replaced
+some fallbacks, so 107 remained), 1h29m, peak memory 260 MB. Nothing was
+learned from model output. What went wrong:
+
+- **The setup day left a backlog.** 4,083 shapes were still pending, nearly
+  all one-offs (an `ls -l` of the initramfs, package names, `--help`
+  output). At 10 a batch, that's about 30 hours of learning lines that never
+  come back. Fix: a pending shape that isn't seen again within a day (by
+  journal time) is dropped. If it ever comes back, it's learned then.
+- **Boot bursts tripped thresholds.** PME signaling and tmpfiles errors
+  arrive in a burst at every boot, and n=5/day counted the burst: three
+  attention alerts per reboot. Fix: no thresholds on lines that only appear
+  in the first 10 minutes after boot (`__MONOTONIC_TIMESTAMP`).
+- **Rules tied to a random container name.** Podman sets
+  `SYSLOG_IDENTIFIER` to the container's name (`optimistic_buck`, new on
+  every gpu-run job). Fix: container sources can't match on it.
+- **Alerts on Andy's own training output.** Fix: `run.scope/container`
+  (gpu-run jobs; `ARGUS_OWNER_SOURCES`) gets no alerting blocks.
+- Left as is: rules about the Claude remote-control service's own output
+  (ignore/count rules are cheap), and 29 kernel rules from boot lines.

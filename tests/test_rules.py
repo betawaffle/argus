@@ -402,6 +402,45 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(eng.db.execute("SELECT summary FROM alerts").fetchall(),
                          [("new u9",)])
 
+    def test_boot_burst_threshold(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        r = rules.make({"name": "pme_signaling", "regex": r"PME: Signaling with IRQ \d+",
+                        "actions": [{"block": "count"}, {"block": "threshold", "n": 5,
+                                     "then": {"block": "flag", "severity": "watch",
+                                              "summary": "PME reached {n}"}}]}, [])
+        boot = [ev("PME: Signaling with IRQ 41", __MONOTONIC_TIMESTAMP="2000000")]
+        p = rules.check(r, "kernel", rs, boot, boot)
+        self.assertTrue(any("after boot" in x for x in p), p)
+        later = [ev("PME: Signaling with IRQ 41", __MONOTONIC_TIMESTAMP=str(9000 * 10**6))]
+        self.assertFalse(any("after boot" in x for x in rules.check(r, "kernel", rs, later)))
+
+    def test_container_name_and_owner_sources(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        e = ev("step 10 loss 0.5", CONTAINER_ID="c", SYSLOG_IDENTIFIER="optimistic_buck")
+        r = rules.make({"name": "train_loss", "match": {"SYSLOG_IDENTIFIER": "optimistic_buck"},
+                        "regex": r"step (?P<step>\d+) loss",
+                        "actions": [{"block": "count"}]}, [e])
+        self.assertTrue(any("container's name" in x
+                            for x in rules.check(r, "demo.service/container", rs, [e])))
+        r = rules.make({"name": "train_loss", "regex": r"step (?P<step>\d+) loss",
+                        "actions": [{"block": "threshold", "n": 50, "then": {
+                            "block": "flag", "severity": "watch", "summary": "x"}}]}, [e])
+        self.assertTrue(any("experiment output" in x
+                            for x in rules.check(r, "run.scope/container", rs, [e])))
+        r["actions"] = [{"block": "count"}]
+        self.assertEqual(rules.check(r, "run.scope/container", rs, [e]), [])
+
+    def test_one_off_pending_expires(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        eng = engine.Engine("local", db=sqlite3.connect(":memory:"), ruleset=rs,
+                            llm=FakeLLM([]), log=lambda m: None)
+        t = 1_760_000_000
+        eng.run(learn_limit=0, events_iter=[ev("setup once", cursor="c1", t=t),
+                                            ev("comes back", cursor="c2", t=t)])
+        eng.run(learn_limit=0, events_iter=[ev("comes back", cursor="c3", t=t + 2 * 86400)])
+        shapes = sorted(r[0] for r in eng.db.execute("SELECT DISTINCT shape FROM pending"))
+        self.assertEqual(shapes, ["comes back"])
+
     def test_backfill_is_baseline(self):
         rs = rules.RuleSet(tempfile.mkdtemp())
         llm = FakeLLM([{"name": "unit_started", "regex": r"Started (?P<unit>\S+) now",
