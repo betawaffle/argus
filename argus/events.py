@@ -116,11 +116,11 @@ def mark_mirrored(events, chunk=2000):
     buf = []
 
     def flush():
-        container = {(e.get("_SYSTEMD_UNIT"), e["MESSAGE"].rstrip("\n"))
+        container = {(e.get("_SYSTEMD_UNIT"), e["MESSAGE"].rstrip())
                      for e in buf if "CONTAINER_ID" in e}
         for e in buf:
             if ("CONTAINER_ID" not in e
-                    and (e.get("_SYSTEMD_UNIT"), e["MESSAGE"].rstrip("\n")) in container):
+                    and (e.get("_SYSTEMD_UNIT"), e["MESSAGE"].rstrip()) in container):
                 e["__MIRRORED"] = True
             yield e
         buf.clear()

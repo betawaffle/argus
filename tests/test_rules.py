@@ -422,6 +422,44 @@ class TestEngine(unittest.TestCase):
         rs.add("demo.service", good, "t")
         self.assertEqual([r["name"] for r in rs.all()], ["derp_connected"])
 
+    def test_normalize_actions(self):
+        self.assertEqual(blocks.normalize(["count", {"threshold": {
+            "n": 3, "then": "collect"}}]),
+            [{"block": "count"}, {"block": "threshold", "n": 3,
+                                  "then": [{"block": "collect"}]}])
+
+    def test_own_model_traffic_not_learned(self):
+        from argus import llm
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        eng = engine.Engine("local", db=sqlite3.connect(":memory:"), ruleset=rs,
+                            llm=FakeLLM([]), log=lambda m: None)
+        t = 1_760_000_000
+        old = llm.own_requests
+        try:
+            engine.llm_requests = lambda since: [(t, t + 30)]
+            llm_line = {"_SYSTEMD_UNIT": "llm-server.service", "CONTAINER_ID": "c"}
+            batch = [ev("Thus propose rule.", cursor="c1", t=t + 20, **llm_line),
+                     ev("Now decide actions", cursor="c2", t=t + 35, **llm_line),
+                     ev("someone else's request", cursor="c3", t=t + 100, **llm_line),
+                     ev("demo line", cursor="c4", t=t + 20)]
+            eng.run(learn_limit=0, events_iter=batch)
+        finally:
+            engine.llm_requests = old
+        shapes = sorted(r[0] for r in eng.db.execute("SELECT shape FROM pending"))
+        self.assertEqual(shapes, ["demo line", "someone else's request"])
+
+    def test_import_transcripts(self):
+        from argus import llm
+        d = Path(tempfile.mkdtemp())
+        ok = [{"t": 100, "kind": "user"}, {"t": 130, "kind": "assistant", "message": {}}]
+        failed = [{"t": 200, "kind": "user"}, {"t": 220, "kind": "tool"}]
+        (d / "a.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ok))
+        (d / "b.jsonl").write_text("".join(json.dumps(r) + "\n" for r in failed))
+        llm.REQUEST_LOG.unlink(missing_ok=True)
+        self.assertEqual(llm.import_transcripts(d, 0), 2)
+        self.assertEqual(llm.own_requests(0), [(100.0, 130.0), (200.0, 1120.0)])
+        self.assertEqual(llm.import_transcripts(d, 0), 0)   # idempotent
+
     def test_proposal_cap(self):
         rs = rules.RuleSet(tempfile.mkdtemp())
         bad = {"name": "x_rule", "regex": "(", "actions": [{"block": "count"}],

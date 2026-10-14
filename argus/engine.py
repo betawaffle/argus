@@ -20,7 +20,9 @@ Flow of one run:
 5. Queued investigations run last (up to --investigate).
 """
 
+import bisect
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -29,6 +31,7 @@ from collections import defaultdict
 from . import blocks, events
 from .agent import DATA_DIR, Agent
 from .learn import Learner
+from .llm import own_requests as llm_requests, prune_requests
 from .patterns import template
 from .rules import RuleSet
 
@@ -45,6 +48,10 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 PENDING_PER_GROUP = 20   # events kept per pending group; enough to learn from
 SOURCE_LINES = 50000     # lines kept per source per batch for rule checks
+# The unit serving the model. Its unmatched lines written while argus's own
+# requests ran are argus talking to itself and are never learned from.
+LLM_UNIT = os.environ.get("ARGUS_LLM_UNIT", "llm-server.service")
+OWN_SLACK = (2, 10)      # seconds before/after a request that still count
 
 INVESTIGATE_SYSTEM = """You are argus, watching unattended Linux machines.
 "local" is a Fedora workstation used for ML experiments; "moneta" is a NixOS
@@ -107,7 +114,8 @@ class Engine:
             self.log("first run: watching from now on")
             return
         groups = defaultdict(list)   # (source, shape) -> events
-        n = matched = mirrored = 0
+        n = matched = mirrored = own = 0
+        self._own = llm_requests(time.time() - 3 * 86400)
         for e in self._pending():
             self._sort(e, groups)
         source_lines = defaultdict(list)   # this batch's lines per source, for checks
@@ -126,6 +134,8 @@ class Engine:
                 source_lines[src].append(e)
             if self.dispatch(e, src):
                 matched += 1
+            elif self._is_own(src, t):
+                own += 1
             else:
                 groups[(src, template(e["MESSAGE"]))].append(e)
             if n % 5000 == 0:
@@ -135,6 +145,7 @@ class Engine:
             self.set_cursor(cursor)
         self.db.commit()
         self.log(f"{n} events, {matched} matched, {mirrored} container echoes "
+                 f"skipped, {own} unmatched lines from argus's own model requests "
                  f"skipped, {len(groups)} unmatched groups")
 
         # Hours the batch covers: rules' rates (and so thresholds) are judged
@@ -175,6 +186,7 @@ class Engine:
             self.db.commit()
 
         self._save_pending(groups)
+        prune_requests(time.time() - 3 * 86400)
         self.db.execute(
             "INSERT INTO runs (t, host, events, matched, learned, pending, seconds) "
             "VALUES (?,?,?,?,?,?,?)",
@@ -182,6 +194,18 @@ class Engine:
              round(time.time() - t0, 1)))
         self.db.commit()
         self.investigate(investigate_limit)
+
+    def _is_own(self, src, t):
+        """Was this line from the model server, written during one of argus's
+        own requests?"""
+        if not src.startswith(LLM_UNIT) or not self._own:
+            return False
+        i = bisect.bisect_right(self._own, (t + OWN_SLACK[0], float("inf"))) - 1
+        # requests don't overlap much; look at the few that started before t
+        for start, end in self._own[max(0, i - 3):i + 1]:
+            if start - OWN_SLACK[0] <= t <= end + OWN_SLACK[1]:
+                return True
+        return False
 
     def _sort(self, e, groups):
         src = events.source(e)
@@ -262,6 +286,13 @@ def reset(args):
 def examples(args):
     eng = Engine(args.host, log=lambda m: print(m, file=sys.stderr))
     print(f"kept {eng.keep_examples(args.since)} example events")
+
+
+def import_requests(args):
+    """Record past model traffic from transcripts (see llm.import_transcripts)."""
+    from .llm import import_transcripts
+    n = import_transcripts(DATA_DIR / "transcripts", time.time() - 3 * 86400)
+    print(f"{n} request windows recorded from transcripts")
 
 
 def main(args):

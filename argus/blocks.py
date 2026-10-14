@@ -260,6 +260,29 @@ def walk(actions):
                     yield from walk(a[sub])
 
 
+def normalize(actions):
+    """Accept the shapes the model tends to write besides the documented one:
+    "count" for {"block": "count"}, and {"count": {"window": "day"}} for
+    {"block": "count", "window": "day"}. Nested then/on_* lists too."""
+    if isinstance(actions, (str, dict)):
+        actions = [actions]
+    if not isinstance(actions, list):
+        return actions
+    out = []
+    for a in actions:
+        if isinstance(a, str) and a in BLOCKS:
+            a = {"block": a}
+        elif (isinstance(a, dict) and "block" not in a and len(a) == 1
+              and next(iter(a)) in BLOCKS):
+            name, params = next(iter(a.items()))
+            a = {"block": name, **(params if isinstance(params, dict) else {})}
+        if isinstance(a, dict):
+            a = {k: normalize(v) if k in ("then", "on_change", "on_new") else v
+                 for k, v in a.items()}
+        out.append(a)
+    return out
+
+
 def validate(actions, path="actions"):
     """Return a list of problems with an action (empty if fine)."""
     if isinstance(actions, dict):

@@ -381,3 +381,50 @@ counts what the proposed regex matches in the batch, over the hours the batch
 covers, and rejects n below 2x normal or above 10x (with a suggested n of 4x).
 The task shows the group's rate over the whole batch. Batches shorter than an
 hour aren't used for this.
+
+## Trial run 6 (2026-10-14)
+
+25,049 lines, 155 groups, 27 rules (4 fallbacks, all one-off llm-server
+startup lines), 14.5 minutes. Thresholds are now in range (3.6x and 4x); the
+check rejected one proposal and the model fixed it.
+
+The follow-up batch found a **feedback loop**: one of argus's own requests got
+HTTP 500, llama-server dumped the model's whole output into its journal one
+line at a time ("Thus propose rule.", `"actions": [`), and the next batch spent
+all 10 learn calls writing rules for argus's own reasoning. Fixes:
+
+- `llm.py` records when each of argus's requests ran
+  (`$ARGUS_DATA/llm-requests.tsv`, last 3 days kept). Unmatched lines from the
+  model's unit (`ARGUS_LLM_UNIT`, default `llm-server.service`) written during
+  one of them (2 s before to 10 s after) are counted and skipped, never
+  learned. Lines a rule matches are still handled as usual.
+- **Echoes with trailing spaces**: the container check compared lines with only
+  the newline stripped, so `[42823] ` and `[42823]` didn't match. It strips all
+  trailing whitespace now.
+- **Action shapes**: 8 proposals were rejected for writing a block as `"count"`
+  or `{"count": {...}}`. Those are accepted and normalized now.
+
+## Trial run 7 (2026-10-14)
+
+The skip works on fresh data: two new HTTP 500 dumps during the follow-up
+batches (41 lines) were skipped and nothing was learned from them. But trial
+6's dump, from before argus recorded its requests, was still in the 6-hour
+window, and about 30 rules were learned from it. `python -m argus rules
+import-requests` recovers request windows for the last 3 days from the agent
+transcripts (a transcript that ends without an answer, i.e. a failed request,
+gets 15 extra minutes, since that's when the dump is written), so a reset and
+re-run doesn't learn it again.
+
+## Trial run 8 (2026-10-14)
+
+After `reset` and `import-requests`: 33,445 lines, 15,329 skipped as argus's
+own model traffic, 13 rules learned (all accepted), nothing pending, 0
+alerts, **3 m 52 s**. A follow-up 11-minute batch took 0.13 s. No rule came
+from model output.
+
+Known gap: the request windows covered 83% of those 6 hours because trials
+ran nearly nonstop, so llm-server's ordinary lines (slots, timings, proxying)
+were skipped too and will be learned later, when the model serves someone
+else while argus is idle. In steady state, other people's model traffic
+during an argus request isn't learned from. Narrowing the skip to argus's own
+llama-server slot or task would fix that if it matters.

@@ -372,7 +372,7 @@ def make(proposal, examples, flagged=False, review=""):
         rule["match"] = proposal["match"]
     if proposal.get("regex"):
         rule["regex"] = proposal["regex"]
-    rule["actions"] = proposal.get("actions") or [{"block": "collect"}]
+    rule["actions"] = blocks.normalize(proposal.get("actions")) or [{"block": "collect"}]
     rule["flagged"] = flagged
     if review:
         rule["review"] = review
