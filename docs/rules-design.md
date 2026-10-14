@@ -67,6 +67,11 @@ things later.
   matching lines can be read. The model's last rejected attempt is kept in
   the rule as `rejected`, and the review note says plainly that these are
   that attempt's problems, not the fallback's.
+- **Each rule keeps its first 5 whole events** (every journal field) in the
+  `rule_events` table, and an alert keeps the whole event that raised it, so
+  the labeling page can show all fields and what the regex captured.
+  `python -m argus rules examples --since -7d` fills them in for rules from a
+  journal window; it only reads otherwise (no actions, counts or cursor).
 - **Rules are scoped to a source** in general. Exactly what counts as a
   source is still open (see 3).
 - **No approval needed for new rules**, but the page lists *all* rules, not

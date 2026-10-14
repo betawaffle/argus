@@ -130,6 +130,9 @@ Mark(part="regex", span=(6, 8), kind="wrong", reason=True,
     field with the replacement text ("ignore", "watch").
   - `no_better_option`: not ideal, but nothing better was available. It is
     never a reason for a bad verdict by default.
+  - `should_use` / `should_not_use`: this (usually a field) should, or
+    shouldn't, have been relied on, e.g. "it should have matched on this
+    field".
 - `reason`: is this mark a reason for the verdict? (see Decided)
 - `note`: optional free text
 
@@ -162,7 +165,26 @@ rule, fallback rules from one source. The group is not part of the item's
 version, so regrouping never makes an item look new. The queue shows one
 unlabeled item per group with "+N like this", and an item's screen offers to
 skip the rest of its group as duplicates of it (`D`), which saves a `skip`
-label with a `duplicate` link on each.
+label with a `duplicate` link on each. `v` lists the others first, with a
+bit of each one's text, and any that aren't really the same can be unticked
+so `D` leaves them in the queue.
+
+### Fields parts and live parts
+
+A part of kind `fields` holds one `key=value` per line, e.g. a whole journal
+event or the groups a regex captured. Keys are drawn muted, and clicking a
+line then pressing a mark key marks that whole field.
+
+An item can also have **live** parts: shown with the context, but not part
+of its version, for facts that change all the time like hit counts. Without
+this, every hit would make a rule look new and send it back to the queue.
+
+### Skip for now
+
+`s` skips an item to come back to: skipped items come after everything not
+yet labeled, oldest skip first, and the item's screen says when you've
+reached them. A skip with a duplicate link counts as done. Pressing `s` on an
+item you've already judged, without changing anything, keeps your label.
 
 ### Source adapter: the only source-specific code
 
