@@ -185,7 +185,9 @@ A changed item is a new version, and the old version's labels stay with it.
 If nothing that was judged changed (the parts are identical and no mark
 points at changed text, e.g. only an example or a hit count moved), the
 latest label is carried onto the new version automatically, marked as
-carried (`carried_from`). Otherwise the item comes back with a banner saying
+carried (`carried_from`). A plain skip on the new version (no marks,
+links or note) doesn't block this, since a skip isn't a judgment; but once a
+label has been carried, skipping it sticks. Otherwise the item comes back with a banner saying
 what changed, and `K` starts from the old label, leaving out marks on text
 that changed.
 

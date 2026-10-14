@@ -80,6 +80,31 @@ class CoreTest(unittest.TestCase):
         self.store.sync([src])
         self.assertIsNone(self.store.latest_label(self.store.current_id("demo", "a"), "andy"))
 
+    def test_carried_label_replaces_plain_skip(self):
+        ctx = lambda t: [Part("where", "field", t)]
+        src = ListSource("demo", [item("a", context=ctx("seen 1 times")),
+                                  item("b", context=ctx("seen 1 times"))])
+        self.store.sync([src])
+        a1, b1 = self.store.current_id("demo", "a"), self.store.current_id("demo", "b")
+        self.store.save_label(a1, "andy", "good", note="fine")
+        self.store.save_label(b1, "andy", "good")
+        src.list = [item("a", context=ctx("seen 2 times")), item("b", context=ctx("seen 2 times"))]
+        self.store.sync([src])
+        a2, b2 = self.store.current_id("demo", "a"), self.store.current_id("demo", "b")
+        # skipped over the carried label: that skip sticks
+        self.store.save_label(a2, "andy", "skip")
+        self.store.sync([src])
+        self.assertEqual(self.store.latest_label(a2, "andy")["verdict"], "skip")
+        # skipped before any carry (labels from before carry-forward existed):
+        # a plain skip gives way, a noted one doesn't
+        self.store.db.execute("DELETE FROM labels WHERE item_id IN (?, ?)", (a2, b2))
+        self.store.save_label(a2, "andy", "skip")
+        self.store.save_label(b2, "andy", "skip", note="come back")
+        self.store.sync([src])
+        lab = self.store.latest_label(a2, "andy")
+        self.assertEqual((lab["verdict"], lab["carried_from"]), ("good", a1))
+        self.assertEqual(self.store.latest_label(b2, "andy")["verdict"], "skip")
+
     def test_priority_doesnt_make_a_new_version(self):
         src = ListSource("demo", [item("a", priority=1)])
         self.store.sync([src])
