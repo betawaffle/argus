@@ -33,8 +33,9 @@ RULES_DIR = Path(os.environ.get("ARGUS_RULES", Path.home() / "work/argus-rules")
 NAME = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 STRUCTURED = {"MESSAGE_ID", "CODE_FILE", "_AUDIT_TYPE_NAME", "PODMAN_EVENT"}
 MIN_LITERAL = 6        # literal characters a regex needs when nothing else narrows it
-NEAR_ALL = 0.95        # a rule matching this share of its source's lines is too broad
 FALLBACK_KEEP = 20     # matching lines a fallback keeps so a human can see them
+MAX_TEMPLATES = 20     # shapes a rule may cover before it's flagged for review
+TOO_BROAD = 0.95       # share of a source's shapes a rule may never cover
 MAX_SAMPLES = 5
 
 
@@ -64,7 +65,7 @@ def _toml_key(k):
     return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
 
 
-FIELD_ORDER = ["name", "match", "regex", "actions", "flagged", "review",
+FIELD_ORDER = ["name", "match", "regex", "actions", "flagged", "fallback", "review",
                "rejected", "created", "samples"]
 
 
@@ -157,9 +158,20 @@ class RuleSet:
         return None, None
 
     def add(self, src, rule, why):
-        self.by_source.setdefault(src, []).append(rule)
+        rules = self.by_source.setdefault(src, [])
+        rules.append(rule)
+        # A real rule replaces the fallbacks it covers: they'd match first.
+        dropped = []
+        if not is_fallback(rule):
+            c = Compiled(rule)
+            for r in list(rules):
+                if is_fallback(r) and any(c.test_message(s) is not None
+                                          for s in r.get("samples", [])):
+                    rules.remove(r)
+                    dropped.append(r["name"])
         self._compile(src)
-        self._save(src, f"add {rule['name']} ({src}): {why}")
+        self._save(src, f"add {rule['name']} ({src}): {why}"
+                   + (f"; replaces {', '.join(dropped)}" if dropped else ""))
 
     def replace(self, src, rule, why):
         rules = self.by_source[src]
@@ -191,11 +203,14 @@ def literal_chars(regex):
     return len(re.sub(r"[.^$*+?()|]", "", s))
 
 
-def check(rule, src, ruleset, examples, recent=()):
+def check(rule, src, ruleset, examples, recent=(), hours=None):
     """Problems with a proposed rule (empty list if it's good).
 
     examples: the events it was written for; it must match all of them.
-    recent:   other recent events from the same source, for the broadness check.
+    recent:   this batch's events from the same source, for the broadness and
+              threshold checks.
+    hours:    how long the batch covers; thresholds are only checked when it
+              is long enough to say what a normal rate is.
     """
     p = []
     name = rule.get("name", "")
@@ -237,16 +252,55 @@ def check(rule, src, ruleset, examples, recent=()):
         p.append(f"doesn't match {len(missed)} of the {len(examples)} example "
                  f"lines, e.g. {missed[0][:300]!r}")
     for older in ruleset.compiled.get(src, ()):
-        if older.name == name:
-            continue
+        if older.name == name or is_fallback(older.rule):
+            continue  # a covered fallback is dropped when this rule is added
         hits = [s for s in older.rule.get("samples", [])
                 if c.test_message(s) is not None]
         if hits:
             p.append(f"overlaps with older rule {older.name!r} (it also matches "
-                     f"{hits[0][:200]!r}); the older rule wins, so narrow this one "
-                     f"or merge them: {json.dumps(older.rule)}")
+                     f"{hits[0][:200]!r}); the older rule wins. Narrow this one, or "
+                     f"merge: propose_rule with name={older.name!r}, replace=true and "
+                     f"a regex covering both. Older rule: {json.dumps(older.rule)}")
     p += identity_problems(rule, c, examples, recent)
+    if hours:
+        p += threshold_problems(rule, c, recent, hours)
     p += broadness_problems(c, src, examples, recent)
+    all_shapes = {template(e["MESSAGE"]) for e in recent}
+    shapes = {template(e["MESSAGE"]) for e in recent if c.test(e) is not None}
+    if len(shapes) > MAX_TEMPLATES and len(shapes) > TOO_BROAD * len(all_shapes):
+        p.append(f"too broad: matches {len(shapes)} of the {len(all_shapes)} "
+                 f"differently shaped lines from this source, e.g. {sorted(shapes)[:3]}")
+    elif len(shapes) > MAX_TEMPLATES:
+        # One rule for one kind of line (all GET requests, say) is what we
+        # want, so this isn't a rejection; a human takes a look.
+        p.append(f"review: broad, covers {len(shapes)} differently shaped lines "
+                 f"from this source, e.g. {sorted(shapes)[:3]}")
+    return p
+
+
+def threshold_problems(rule, c, recent, hours):
+    """A threshold that a normal day reaches alerts every day; one far above
+    normal never fires. Judged from what the regex matches in this batch."""
+    p = []
+    thresholds = [a for a in blocks.walk(rule.get("actions"))
+                  if a.get("block") == "threshold" and isinstance(a.get("n"), int)]
+    if not thresholds:
+        return p
+    hits = sum(1 for e in recent if c.test(e) is not None)
+    for a in thresholds:
+        window = a.get("window", "day")
+        normal = hits / hours * blocks.WINDOWS.get(window, 86400) / 3600
+        good = max(5, round(normal * 4))
+        if a["n"] < 2 * normal:
+            p.append(f"threshold n={a['n']} per {window} is too low: this rule "
+                     f"matched {hits} lines in {hours:.1f} hours, about "
+                     f"{normal:.0f} per {window} normally, so it would alert on a "
+                     f"normal {window}. Use about n={good}.")
+        elif a["n"] > 20 and a["n"] > 10 * max(normal, 1):
+            p.append(f"threshold n={a['n']} per {window} is too high: this rule "
+                     f"matched {hits} lines in {hours:.1f} hours, about "
+                     f"{normal:.0f} per {window}, so it would never fire. "
+                     f"Use about n={good}.")
     return p
 
 
@@ -261,10 +315,10 @@ def broadness_problems(c, src, examples, recent=()):
     """Is the rule so broad it would swallow lines it wasn't written for?
 
     Covering many differently shaped lines is fine (routine chatter from one
-    daemon comes in many shapes). Two things are not:
-    - matching nearly every line from the source, beyond the example group;
-    - sweeping in lines more severe than the examples (warnings or errors when
-      it was written for info lines), which would hide trouble.
+    daemon comes in many shapes; check() flags that for review and rejects
+    only nearly all of a source's shapes). Sweeping in lines more severe than
+    the examples (warnings or errors when it was written for info lines) is
+    not: it would hide trouble.
     """
     p = []
     matched = [e for e in recent if c.test(e) is not None]
@@ -272,10 +326,6 @@ def broadness_problems(c, src, examples, recent=()):
         return p
     own = {template(e["MESSAGE"]) for e in examples}
     extra = [e for e in matched if template(e["MESSAGE"]) not in own]
-    if len(recent) >= 50 and len(matched) >= NEAR_ALL * len(recent) and extra:
-        p.append(f"too broad: matches {len(matched)} of the {len(recent)} recent lines "
-                 f"from this source, nearly all of them, e.g. "
-                 f"{extra[0]['MESSAGE'][:200]!r}. Narrow it to this kind of line.")
     if not src.endswith("/container"):  # podman logs all container output at err
         mine = [x for x in map(_priority, examples) if x is not None]
         floor = min(mine) if mine else None
@@ -338,6 +388,8 @@ PLACEHOLDERS = [
     ("ip", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b"), r"[0-9.]+(?::\d+)?"),
     ("ip6", re.compile(r"\b[0-9a-f]*:[0-9a-f]*:[0-9a-f:]+\b", re.I), r"[0-9a-fA-F:]+"),
     ("hex", re.compile(r"\b0x[0-9a-f]+\b|\b[0-9a-f]{12,}\b", re.I), r"(?:0x)?[0-9a-fA-F]+"),
+    ("dur", re.compile(r"(?<![\d.])(?:\d+(?:\.\d+)?(?:ms|us|µs|ns|h|m|s|d))+(?![A-Za-z\d])"),
+     r"[\d.a-zµ]+"),
     ("n", re.compile(r"(?<![A-Za-z_\d])\d+(?:\.\d+)?"), r"\d+(?:\.\d+)?"),
 ]
 
@@ -376,6 +428,12 @@ def fallback(examples, name, why, rejected=None):
                  "actions": [{"block": "count", "window": "day"},
                              {"block": "collect", "limit": FALLBACK_KEEP}]},
                 examples, flagged=True, review=why)
+    rule["fallback"] = True
     if rejected:
         rule["rejected"] = rejected
+
     return rule
+
+
+def is_fallback(rule):
+    return bool(rule.get("fallback")) or rule.get("name", "").startswith("unlearned_")
