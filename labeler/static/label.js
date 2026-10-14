@@ -9,10 +9,12 @@
   const L = window.LABEL;
   const ITEM = L.item;
   const KINDS = { w: "wrong", g: "good", h: "from_here", m: "missing",
-                  e: "unsupported", i: "unclear", b: "should_be", o: "no_better_option" };
+                  e: "unsupported", i: "unclear", b: "should_be", o: "no_better_option",
+                  "+": "should_use", "-": "should_not_use" };
   const KIND_NAMES = { wrong: "wrong", good: "good", from_here: "went wrong from here",
                        missing: "missing", unsupported: "unsupported", unclear: "unclear",
-                       should_be: "should be…", no_better_option: "no better option" };
+                       should_be: "should be…", no_better_option: "no better option",
+                       should_use: "should use this", should_not_use: "shouldn't use this" };
   const LINK_NAMES = { duplicate: "duplicate of", related: "related to" };
 
   // Every markable block: the item's parts, its context, and refs' parts.
@@ -22,7 +24,7 @@
                                           refTitle }));
   }
   addBlocks(ITEM, "parts", ITEM.parts);
-  addBlocks(ITEM, "context", ITEM.context || []);
+  addBlocks(ITEM, "context", [...(ITEM.context || []), ...(ITEM.live || [])]);
   L.refs.forEach(r => { if (r.id) {
     addBlocks(r, "ref", r.parts, r.title);
     addBlocks(r, "ref", r.context || [], r.title);
@@ -32,13 +34,15 @@
 
   const prior = L.label;
   const S = {
-    verdict: prior ? prior.verdict : null,
+    verdict: prior && prior.verdict !== "skip" ? prior.verdict : null,
     fixable: prior ? !!prior.fixable : false,
     confidence: prior ? prior.confidence : null,
     note: prior ? prior.note || "" : "",
     marks: prior ? prior.marks.map(m => ({ ...m })) : [],
     links: prior ? (prior.links || []).map(x => ({ ...x })) : [],
     picker: null,         // {kind, filter} while choosing a link target
+    showGroup: false,     // listing the near-duplicates waiting
+    groupOff: new Set(),  // near-duplicates unticked: not skipped with D
     sel: null,            // index into S.marks
     cursor: 0,            // index into blocks
     dirty: false,
@@ -94,6 +98,10 @@
     const points = mine.filter(x => x.m.end === x.m.start);
     const cuts = new Set([0, text.length]);
     spans.forEach(x => { cuts.add(x.m.start); cuts.add(x.m.end); });
+    // "fields" parts are key=value lines: the keys are drawn differently.
+    const keys = blk.part.kind === "fields" ? fieldKeys(text) : [];
+    keys.forEach(([a, b]) => { cuts.add(a); cuts.add(b); });
+    const isKey = a => keys.some(([ka, kb]) => a >= ka && a < kb);
     if (after != null) cuts.add(after);
     const bounds = [...cuts].filter(c => c >= 0 && c <= text.length).sort((a, b) => a - b);
     const body = h("div", { class: "body" });
@@ -109,14 +117,16 @@
       if (cover.length) {
         const top = cover[cover.length - 1];
         const cls = ["m", `k-${top.m.kind}`];
+        if (isKey(a)) cls.push("fk");
         if (cover.some(x => x.i === S.sel)) cls.push("sel");
         if (!cover.some(x => isReason(x.m))) cls.push("noreason");
         if (dim) cls.push("after-text");
         body.append(h("span", { class: cls.join(" "),
                                 "data-marks": cover.map(x => x.i).join(","),
                                 title: cover.map(x => KIND_NAMES[x.m.kind]).join(", ") }, seg));
-      } else if (dim) {
-        body.append(h("span", { class: "after-text" }, seg));
+      } else if (dim || isKey(a)) {
+        body.append(h("span", { class: (dim ? "after-text " : "") + (isKey(a) ? "fk" : "") },
+                      seg));
       } else {
         body.append(seg);
       }
@@ -124,6 +134,23 @@
     pointsAt(text.length);
     body._blk = blk;
     return body;
+  }
+
+  // [start, end) of each key (up to and including "=") in key=value lines
+  function fieldKeys(text) {
+    const out = [];
+    let at = 0;
+    for (const line of text.split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq > 0) out.push([at, at + eq + 1]);
+      at += line.length + 1;
+    }
+    return out;
+  }
+  function lineAt(text, pos) {
+    const a = text.lastIndexOf("\n", pos - 1) + 1;
+    const b = text.indexOf("\n", pos);
+    return [a, b < 0 ? text.length : b];
   }
 
   function renderBlock(blk, idx, fh) {
@@ -231,7 +258,7 @@
       h("button", { class: "save", type: "button", disabled: !v && !hasDuplicate(),
                     onclick: () => save() }, "Save and next ⏎"),
       h("div", { class: "keys", style: "margin-top:8px" },
-        h("a", { href: "#", onclick: e => { e.preventDefault(); save("skip"); } }, "skip"),
+        h("a", { href: "#", onclick: e => { e.preventDefault(); skip(); } }, "skip for now"),
         " (s) · ", h("a", { href: L.queue }, "queue"), " (q) · ",
         h("a", { href: "#", onclick: e => { e.preventDefault(); toggleHelp(); } }, "keys"),
         " (?)"));
@@ -285,16 +312,41 @@
 
   async function markGroupDuplicates() {
     if (!L.group.length) return toast("Nothing else like this is waiting");
-    if (!confirm(`Skip all ${L.group.length} others like this as duplicates of this one?`))
-      return;
+    const ids = L.group.filter(g => !S.groupOff.has(g.id)).map(g => g.id);
+    if (!ids.length) return toast("None ticked");
+    if (!confirm(`Skip ${ids.length} others like this as duplicates of this one?`)) return;
     const resp = await fetch(L.group_api, { method: "POST",
-      body: JSON.stringify({ item_id: ITEM.id }), headers: { "Content-Type": "application/json" } });
+      body: JSON.stringify({ item_id: ITEM.id, ids }),
+      headers: { "Content-Type": "application/json" } });
     if (!resp.ok) return toast("Failed: " + await resp.text());
     const { n } = await resp.json();
-    L.group = [];
+    L.group = L.group.filter(g => !ids.includes(g.id));
     toast(`Marked ${n} as duplicates`);
     render();
   }
+
+  function renderGroup() {
+    const on = L.group.filter(g => !S.groupOff.has(g.id)).length;
+    return h("div", { class: "banner" },
+      `${L.group.length} more like this waiting. `,
+      h("a", { href: "#", onclick: e => { e.preventDefault(); toggleGroup(); } },
+        S.showGroup ? "Hide them" : "See them"), " (v) · ",
+      h("a", { href: "#", onclick: e => { e.preventDefault(); markGroupDuplicates(); } },
+        on === L.group.length ? "Skip them all as duplicates of this one"
+                              : `Skip the ${on} ticked as duplicates of this one`), " (D)",
+      S.showGroup && h("ul", { class: "group-list" }, L.group.map(g =>
+        h("li", {},
+          h("label", {},
+            h("input", { type: "checkbox", checked: !S.groupOff.has(g.id),
+                         onchange: e => { if (e.target.checked) S.groupOff.delete(g.id);
+                                          else S.groupOff.add(g.id); render(); } }),
+            " ", h("a", { href: `${L.prefix}/i/${g.id}`, target: "_blank" }, g.title),
+            g.state === "later" ? h("span", { class: "muted" }, " (skipped earlier)") : null),
+          g.preview && h("div", { class: "where" }, g.preview)))),
+      S.showGroup && h("div", { class: "muted" },
+        "Untick any that aren't really the same; they stay in the queue."));
+  }
+  function toggleGroup() { S.showGroup = !S.showGroup; render(); }
 
   function renderHelp() {
     const rows = [
@@ -306,7 +358,9 @@
       ["select, then b", "should be something else (type what)"],
       ["select, then o", "no better option: wrong only because nothing better was allowed"],
       ["d / l", "this item is a duplicate of / related to one you've labeled"],
-      ["D", "skip all other items like this as duplicates of this one"],
+      ["click a field, then + / -", "it should / shouldn't have used this field"],
+      ["v", "see the other items like this one"],
+      ["D", "skip the other items like this (the ticked ones) as duplicates of this one"],
       ["M", "something is missing from the whole item"],
       ["j / k", "move between parts (marks without a selection go here)"],
       [", / .", "previous / next mark"],
@@ -318,7 +372,7 @@
       ["f", "bad, but good if the marked things were fixed"],
       ["c", "cycle confidence"],
       ["Enter", "save and go to the next item (Ctrl+Enter in a text box)"],
-      ["s", "skip this item"],
+      ["s", "skip for now: it comes back after everything new"],
       ["u / q", "back / queue"],
       ["Esc", "leave a text box, deselect"],
     ];
@@ -352,17 +406,17 @@
       ITEM.question && h("div", { class: "question" }, ITEM.question),
       !ITEM.current && h("div", { class: "banner" },
         "This is an older version; the item has changed since."),
-      prior && h("div", { class: "banner muted" },
+      prior && prior.verdict !== "skip" && h("div", { class: "banner muted" },
         `Editing your label from ${new Date(prior.t * 1000).toLocaleString()}.`),
       L.previous && h("div", { class: "banner muted" },
         `You labeled an older version of this: ${L.previous.verdict}` +
         (L.previous.marks.length ? `, ${L.previous.marks.length} marks` : "") +
         (L.previous.note ? ` (“${L.previous.note}”)` : "") + ". ",
         h("a", { href: `${L.prefix}/i/${L.previous.item_id}` }, "see it")),
-      L.group.length ? h("div", { class: "banner" },
-        `${L.group.length} more like this waiting. `,
-        h("a", { href: "#", onclick: e => { e.preventDefault(); markGroupDuplicates(); } },
-          "Skip them all as duplicates of this one"), " (D)") : null,
+      L.state === "later" && h("div", { class: "banner" },
+        L.todo_left ? "You skipped this earlier to come back to."
+                    : "Nothing new is waiting: these are the items you skipped earlier."),
+      L.group.length ? renderGroup() : null,
       groups.parts,
       groups.context.length ? [h("div", { class: "group-title" }, "Context"),
                                groups.context] : null,
@@ -420,7 +474,11 @@
     } else {
       const sel = selection();
       if (sel && sel.cross) return toast("Keep a mark inside one part");
-      if (sel && sel.end > sel.start) {
+      if (sel && sel.end === sel.start && sel.blk.part.kind === "fields") {
+        // A click on a field line marks that whole field.
+        const [a, b] = lineAt(sel.blk.part.text, sel.start);
+        m = { item_id: sel.blk.itemId, part: sel.blk.part.id, start: a, end: b };
+      } else if (sel && sel.end > sel.start) {
         m = { item_id: sel.blk.itemId, part: sel.blk.part.id, start: sel.start, end: sel.end };
       } else if (sel && (kind === "from_here" || kind === "missing")) {
         m = { item_id: sel.blk.itemId, part: sel.blk.part.id, start: sel.start, end: sel.start };
@@ -470,6 +528,13 @@
     if (!resp.ok) return toast("Not saved: " + await resp.text());
     S.dirty = false;
     location.href = L.next;
+  }
+
+  // Skip for now: the item comes back after everything not yet labeled. An
+  // item you've already judged keeps its label unless you changed something.
+  function skip() {
+    if (prior && prior.verdict !== "skip" && !S.dirty) { location.href = L.next; return; }
+    save("skip");
   }
 
   // --- events ----------------------------------------------------------------
@@ -538,6 +603,7 @@
     else if (k === "d") openPicker("duplicate");
     else if (k === "l") openPicker("related");
     else if (k === "D") markGroupDuplicates();
+    else if (k === "v" && L.group.length) toggleGroup();
     else if (k === "1") set({ verdict: "good" });
     else if (k === "2") set({ verdict: "bad" });
     else if (k === "3") set({ verdict: "unsure" });
@@ -557,7 +623,7 @@
       document.querySelector(`.mark-note[data-i="${S.sel}"]`).focus();
     else if (k === "n" || k === "N") document.getElementById("note").focus();
     else if (k === "Enter") save();
-    else if (k === "s") save("skip");
+    else if (k === "s") skip();
     else if (k === "u") history.back();
     else if (k === "q") location.href = L.queue;
     else if (k === "?") toggleHelp();

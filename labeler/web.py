@@ -9,7 +9,8 @@ Pages:
     {prefix}/next           redirect to the next unlabeled item
     {prefix}/i/<id>         the review screen for one item version
     {prefix}/api/label      POST a label as JSON
-    {prefix}/api/group_duplicates  POST {item_id}: skip its whole group as duplicates
+    {prefix}/api/group_duplicates  POST {item_id, ids?}: skip its group (or just
+                                   ids) as duplicates of it
     {prefix}/export.jsonl   every label with its item snapshot
 """
 
@@ -90,7 +91,8 @@ class App:
                 return self.post_label(json.loads(body or b"{}"))
             if method == "POST" and rest == "/api/group_duplicates":
                 d = json.loads(body or b"{}")
-                n = self.store.mark_group_duplicates(int(d["item_id"]), self.by)
+                n = self.store.mark_group_duplicates(int(d["item_id"]), self.by,
+                                                     d.get("ids"))
                 return 200, "application/json", json.dumps({"ok": True, "n": n}).encode()
             if method == "GET" and rest == "/export.jsonl":
                 lines = "".join(json.dumps(x, ensure_ascii=False) + "\n"
@@ -131,16 +133,19 @@ class App:
         body = [f"<h2>Labeling</h2><p>{' · '.join(tabs)}</p>"]
         if q.get("done"):
             body.append("<p>Nothing left to label here. 🎉</p>")
+        todo = sum(r["state"] == "todo" for r in rows)
+        later = sum(r["state"] == "later" for r in rows)
         body.append(f"<p><a href='{start}'><b>Start labeling &rarr;</b></a> "
-                    f"<span class=muted>({sum(r['verdict'] is None for r in rows)} waiting)"
-                    f"</span> · <a href='{p}?{'' if show_all else 'all&'}"
+                    f"<span class=muted>({todo} waiting"
+                    + (f", then {later} you skipped for later" if later else "")
+                    + f")</span> · <a href='{p}?{'' if show_all else 'all&'}"
                     f"{'source=' + urllib.parse.quote(source) if source else ''}'>"
                     f"{'hide' if show_all else 'show'} labeled</a> · "
                     f"<a href={p}/export.jsonl>export</a></p>")
         # Near-duplicates (same group) collapse into their first item.
         shown, extra = [], {}
         for r in rows:
-            g = (r["source"], r["group"], r["verdict"] is None) if r["group"] else None
+            g = (r["source"], r["group"], r["state"]) if r["group"] else None
             if g and g in extra:
                 extra[g] += 1
                 continue
@@ -151,7 +156,8 @@ class App:
             f"<tr><td><a href={p}/i/{r['id']}>{esc(r['title'])}</a>"
             + (f" <span class=muted>+{extra[g]} like this</span>" if g and extra[g] else "")
             + f"</td><td class=muted>{esc(r['source'])}</td>"
-            f"<td>{esc(r['verdict'] or '')}</td></tr>" for r, g in shown)
+            f"<td>{'skipped for later' if r['state'] == 'later' else esc(r['verdict'] or '')}"
+            f"</td></tr>" for r, g in shown)
         body.append("<table><tr><th>item</th><th>source</th><th>your verdict</th></tr>"
                     + (trs or "<tr><td colspan=3 class=muted>Nothing here.</td></tr>")
                     + "</table>")
@@ -184,7 +190,11 @@ class App:
             "next": f"{self.prefix}/next?after={item_id}" + (
                 f"&source={urllib.parse.quote(source)}" if source else ""),
             "prefix": self.prefix,
-            "group": self.store.group_of(item_id, self.by)[:50],
+            "group": [self.preview(r) for r in self.store.group_of(item_id, self.by)[:50]],
+            "state": next((r["state"] for r in self.store.queue(
+                self.by, item["source"], include_labeled=True, limit=None)
+                if r["id"] == item_id), None),
+            "todo_left": any(r["state"] == "todo" for r in self.store.queue(self.by)),
             "recent": self.store.recent(self.by, exclude=item_id),
             "group_api": f"{self.prefix}/api/group_duplicates",
         }
@@ -194,6 +204,14 @@ class App:
                 f"<script src={self.prefix}/static/label.js></script>")
         return 200, "text/html; charset=utf-8", shell(f"label: {item['title']}", body,
                                                       self.nav, head)
+
+    def preview(self, row):
+        """A group member, with enough of its text to tell it apart."""
+        it = self.store.item(row["id"]) or {}
+        bits = [p["text"] for p in (it.get("parts") or [])[:1] + (it.get("context") or [])[:2]]
+        text = " · ".join(" ".join(b.split())[:200] for b in bits if b)
+        return {"id": row["id"], "title": row["title"], "state": row["state"],
+                "preview": text}
 
     def post_label(self, d):
         item_id = int(d["item_id"])

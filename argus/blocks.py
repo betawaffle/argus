@@ -42,15 +42,36 @@ CREATE TABLE IF NOT EXISTS tracked (
 CREATE TABLE IF NOT EXISTS distinct_values (
     rule TEXT, field TEXT, value TEXT, first_seen REAL,
     PRIMARY KEY (rule, field, value));
+CREATE TABLE IF NOT EXISTS rule_events (
+    id INTEGER PRIMARY KEY, rule TEXT, t REAL, event TEXT);
 CREATE INDEX IF NOT EXISTS collected_rule ON collected (rule);
+CREATE INDEX IF NOT EXISTS rule_events_rule ON rule_events (rule);
 CREATE INDEX IF NOT EXISTS extracts_rule ON extracts (rule, t);
 """
+
+
+EXAMPLES_PER_RULE = 5   # whole events kept per rule, so a person can see every field
 
 
 class State:
     def __init__(self, db):
         self.db = db if isinstance(db, sqlite3.Connection) else sqlite3.connect(db)
         self.db.executescript(SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(alerts)")}
+        if "event" not in cols:  # added 2026-10-14
+            self.db.execute("ALTER TABLE alerts ADD COLUMN event TEXT")
+        self._examples = None    # rule -> events kept, loaded on first use
+
+    def keep_example(self, rule, event, t):
+        """Keep the first few whole events a rule matches (all their fields)."""
+        if self._examples is None:
+            self._examples = dict(self.db.execute(
+                "SELECT rule, count(*) FROM rule_events GROUP BY rule"))
+        if self._examples.get(rule, 0) >= EXAMPLES_PER_RULE:
+            return
+        self._examples[rule] = self._examples.get(rule, 0) + 1
+        self.db.execute("INSERT INTO rule_events (rule, t, event) VALUES (?,?,?)",
+                        (rule, t, json.dumps(event, ensure_ascii=False)))
 
     def hit(self, rule, t):
         self.db.execute(
@@ -61,10 +82,11 @@ class State:
     def alert(self, rule, severity, summary, ctx):
         e = ctx["event"]
         self.db.execute(
-            "INSERT INTO alerts (rule, t, severity, summary, message, cursor, data) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO alerts (rule, t, severity, summary, message, cursor, data, "
+            "event) VALUES (?,?,?,?,?,?,?,?)",
             (rule, ctx["t"], severity, summary, e.get("MESSAGE", "")[:2000],
-             e.get("__CURSOR"), json.dumps(ctx["groups"])))
+             e.get("__CURSOR"), json.dumps(ctx["groups"]),
+             json.dumps(e, ensure_ascii=False)))
 
 
 def event_time(event):

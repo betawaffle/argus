@@ -25,15 +25,18 @@ KINDS = ("wrong", "good", "from_here", "missing",
          "unsupported",       # might be true, but nothing shows it
          "unclear",           # can't follow it: unexplained term or reasoning
          "should_be",         # a correction; the mark's `fix` says what instead
-         "no_better_option")  # wrong only because the choices didn't allow better
+         "no_better_option",  # wrong only because the choices didn't allow better
+         "should_use",        # this (e.g. a field) should have been relied on
+         "should_not_use")    # this should not have been relied on
 LINK_KINDS = ("duplicate", "related")
-PART_KINDS = ("text", "code", "field")
+PART_KINDS = ("text", "code", "field", "fields")
 
 
 @dataclass
 class Part:
     id: str               # unique within the item, e.g. "regex" or "p3"
-    kind: str             # text | code | field: only changes how it's shown
+    kind: str             # text | code | field | fields: only changes how it's
+                          # shown. fields = one "key=value" per line
     text: str
     label: str = ""       # heading to show; defaults to the id
 
@@ -50,12 +53,15 @@ class Item:
     priority: float = 0   # higher is reviewed first
     link: str = ""        # where to see it in its own app, if anywhere
     group: str = ""       # items with the same group are near-duplicates
+    live: list = field(default_factory=list)      # [Part] shown with the context
+    # but not part of the version: facts that change all the time (hit counts)
 
     def snapshot(self):
         """What gets stored and hashed: everything shown to the labeler."""
         d = asdict(self)
         d.pop("priority")  # changes all the time and isn't shown
         d.pop("group")     # how the adapter clusters items, not their content
+        d.pop("live")      # changes all the time; kept current on each sync
         d["refs"] = [list(r) for r in self.refs]
         return d
 
@@ -108,7 +114,8 @@ CREATE TABLE IF NOT EXISTS links (
 CREATE INDEX IF NOT EXISTS links_label ON links (label_id);
 """
 # Columns added after the first release: (table, column, type).
-MIGRATIONS = [("marks", "fix", "TEXT"), ("items", "grp", "TEXT DEFAULT ''")]
+MIGRATIONS = [("marks", "fix", "TEXT"), ("items", "grp", "TEXT DEFAULT ''"),
+              ("items", "live", "TEXT")]
 
 
 class Store:
@@ -134,22 +141,23 @@ class Store:
             for it in src.items():
                 snap = it.snapshot()
                 ver = version_of(snap)
+                live = json.dumps([asdict(p) for p in it.live], ensure_ascii=False)
                 seen.add(it.key)
                 row = self.db.execute(
                     "SELECT id FROM items WHERE source=? AND key=? AND version=?",
                     (it.source, it.key, ver)).fetchone()
                 if row:
                     self.db.execute("UPDATE items SET last_seen=?, priority=?, grp=?, "
-                                    "current=1 WHERE id=?",
-                                    (now, it.priority, it.group, row[0]))
+                                    "live=?, current=1 WHERE id=?",
+                                    (now, it.priority, it.group, live, row[0]))
                     continue
                 self.db.execute("UPDATE items SET current=0 WHERE source=? AND key=?",
                                 (it.source, it.key))
                 self.db.execute(
                     "INSERT INTO items (source, key, version, snapshot, first_seen, "
-                    "last_seen, priority, grp) VALUES (?,?,?,?,?,?,?,?)",
+                    "last_seen, priority, grp, live) VALUES (?,?,?,?,?,?,?,?,?)",
                     (it.source, it.key, ver, json.dumps(snap, ensure_ascii=False),
-                     now, now, it.priority, it.group))
+                     now, now, it.priority, it.group, live))
                 new += 1
             # Items the source no longer offers (deleted rules, pruned rows).
             gone = [k for (k,) in self.db.execute(
@@ -162,13 +170,13 @@ class Store:
         return new
 
     def item(self, item_id):
-        row = self.db.execute("SELECT id, source, key, version, snapshot, current "
+        row = self.db.execute("SELECT id, source, key, version, snapshot, current, live "
                               "FROM items WHERE id=?", (item_id,)).fetchone()
         if not row:
             return None
-        iid, source, key, version, snap, current = row
+        iid, source, key, version, snap, current, live = row
         return {"id": iid, "version": version, "current": bool(current),
-                **json.loads(snap)}
+                **json.loads(snap), "live": json.loads(live or "[]")}
 
     def current_id(self, source, key):
         row = self.db.execute("SELECT id FROM items WHERE source=? AND key=? AND current=1",
@@ -176,26 +184,45 @@ class Store:
         return row[0] if row else None
 
     def queue(self, by, source=None, include_labeled=False, limit=500):
-        """Current items, unlabeled (by `by`) first, highest priority first."""
+        """Current items in review order, each with a state for `by`:
+        todo (not labeled, highest priority first), then later (skipped to come
+        back to, oldest skip first), then done. done is left out unless
+        include_labeled. A skip that links a duplicate counts as done."""
         sql = """
+            WITH last AS (SELECT item_id, max(id) AS lid FROM labels WHERE by = ?
+                          GROUP BY item_id)
             SELECT i.id, i.source, i.key, json_extract(i.snapshot, '$.title'),
-                   i.priority, i.first_seen, i.grp,
-                   (SELECT verdict FROM labels l WHERE l.item_id = i.id AND l.by = ?
-                    ORDER BY l.id DESC LIMIT 1) AS verdict
-            FROM items i WHERE i.current = 1 """
+                   i.priority, i.first_seen, i.grp, l.verdict, l.id,
+                   EXISTS (SELECT 1 FROM links k WHERE k.label_id = l.id
+                           AND k.kind = 'duplicate')
+            FROM items i LEFT JOIN last ON last.item_id = i.id
+            LEFT JOIN labels l ON l.id = last.lid
+            WHERE i.current = 1 """
         args = [by]
         if source:
             sql += "AND i.source = ? "
             args.append(source)
-        sql += "ORDER BY verdict IS NOT NULL, i.priority DESC, i.first_seen DESC, i.id DESC"
-        rows = self.db.execute(sql, args).fetchall()
-        if not include_labeled:
-            rows = [r for r in rows if r[7] is None]
-        return [dict(zip(("id", "source", "key", "title", "priority", "first_seen",
-                          "group", "verdict"), r)) for r in rows[:limit]]
+        rows = []
+        for (iid, src, key, title, prio, first, grp, verdict, lid,
+             dup) in self.db.execute(sql, args):
+            state = ("todo" if verdict is None else
+                     "later" if verdict == "skip" and not dup else "done")
+            if state == "done" and not include_labeled:
+                continue
+            rows.append({"id": iid, "source": src, "key": key, "title": title,
+                         "priority": prio, "first_seen": first, "group": grp,
+                         "verdict": verdict, "state": state, "_lid": lid})
+        order = {"todo": 0, "later": 1, "done": 2}
+        rows.sort(key=lambda r: (order[r["state"]],
+                                 r["_lid"] if r["state"] == "later" else 0,
+                                 -(r["priority"] or 0), -(r["first_seen"] or 0), -r["id"]))
+        for r in rows:
+            del r["_lid"]
+        return rows[:limit]
 
     def group_of(self, item_id, by, unlabeled_only=True):
-        """Other current items in the same group (near-duplicates)."""
+        """Other current items in the same group (near-duplicates): by default
+        only those still to do or skipped for later."""
         row = self.db.execute("SELECT source, grp FROM items WHERE id=?",
                               (item_id,)).fetchone()
         if not row or not row[1]:
@@ -216,11 +243,12 @@ class Store:
                 for r in rows if r[0] != exclude][:limit]
 
     def counts(self, by):
-        """{source: (current items, labeled by `by`)}"""
-        return {s: (n, done) for s, n, done in self.db.execute("""
-            SELECT source, count(*), sum(EXISTS (SELECT 1 FROM labels l
-                                                 WHERE l.item_id = i.id AND l.by = ?))
-            FROM items i WHERE current = 1 GROUP BY source ORDER BY source""", (by,))}
+        """{source: (current items, done by `by`)}; skipped-for-later isn't done."""
+        out = {}
+        for r in self.queue(by, include_labeled=True, limit=None):
+            n, done = out.get(r["source"], (0, 0))
+            out[r["source"]] = (n + 1, done + (r["state"] == "done"))
+        return dict(sorted(out.items()))
 
     # --- labels -------------------------------------------------------------
     def save_label(self, item_id, by, verdict, marks=(), fixable=None, confidence=None,
@@ -311,10 +339,13 @@ class Store:
                     "SELECT kind, target, note FROM links WHERE label_id=? ORDER BY id",
                     (lid,))]
 
-    def mark_group_duplicates(self, item_id, by):
-        """Label every unlabeled near-duplicate of item_id as a skipped
-        duplicate of it. Returns how many."""
+    def mark_group_duplicates(self, item_id, by, ids=None):
+        """Label the unlabeled near-duplicates of item_id (all of them, or just
+        `ids`) as skipped duplicates of it. Returns how many."""
         others = self.group_of(item_id, by)
+        if ids is not None:
+            ids = {int(i) for i in ids}
+            others = [o for o in others if o["id"] in ids]
         for o in others:
             self.save_label(o["id"], by, "skip",
                             links=[{"kind": "duplicate", "target": item_id,

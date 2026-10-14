@@ -174,7 +174,38 @@ class NewKindsLinksGroupsTest(unittest.TestCase):
         self.assertEqual((lab["verdict"], lab["links"][0]["target"]), ("skip", a))
         self.assertEqual(self.store.group_of(a, "andy"), [])
 
-    def test_group_is_not_content(self):
+    def test_group_duplicates_only_ticked(self):
+        a = self.id["a"]
+        self.assertEqual(self.store.mark_group_duplicates(a, "andy", ids=[self.id["b"]]), 1)
+        self.assertEqual([r["id"] for r in self.store.group_of(a, "andy")], [self.id["c"]])
+
+    def test_skip_comes_back_last(self):
+        a, b, c, d = (self.id[k] for k in "abcd")
+        self.store.save_label(a, "andy", "skip")
+        self.store.save_label(b, "andy", "skip")
+        self.store.save_label(c, "andy", "skip", links=[{"kind": "duplicate", "target": a}])
+        q = self.store.queue("andy")
+        self.assertEqual([(r["id"], r["state"]) for r in q],
+                         [(d, "todo"), (a, "later"), (b, "later")])  # oldest skip first
+        self.assertEqual(self.store.counts("andy")["demo"], (4, 1))  # only the duplicate is done
+        self.store.save_label(a, "andy", "good")
+        self.assertEqual([r["id"] for r in self.store.queue("andy")], [d, b])
+
+    def test_new_field_kinds(self):
+        self.store.save_label(self.id["a"], "andy", "bad", marks=[
+            {"kind": "should_use", "part": "p1", "start": 0, "end": 3},
+            {"kind": "should_not_use", "part": "p1", "start": 4, "end": 5}])
+        marks = self.store.latest_label(self.id["a"], "andy")["marks"]
+        self.assertEqual([m["reason"] for m in marks], [True, True])
+
+    def test_live_parts_dont_make_a_new_version(self):
+        self.src.list = [item("a", group="g", live=[Part("stats", "field", "3 hits")])]
+        self.assertEqual(self.store.sync([self.src]), 0)
+        self.src.list = [item("a", group="g", live=[Part("stats", "field", "9 hits")])]
+        self.assertEqual(self.store.sync([self.src]), 0)
+        self.assertEqual(self.store.item(self.id["a"])["live"][0]["text"], "9 hits")
+
+
         # Changing an item's group must not make a new version.
         self.src.list = [item("a", group="other")]
         self.assertEqual(self.store.sync([self.src]), 0)
@@ -301,6 +332,30 @@ class ArgusSourcesTest(unittest.TestCase):
         (rule,) = label_sources.Rules(self.db, self.rs).items()
         self.assertEqual([p.id for p in rule.parts], ["regex", "actions"])
         self.assertEqual(rule.context[0].id, "review")           # flagged: reason shown first
+
+    def test_whole_events_and_captures(self):
+        from argus.blocks import State
+        st = State(self.db)
+        ev = {"MESSAGE": "boom 7", "PRIORITY": "3", "_SYSTEMD_UNIT": "x.service",
+              "__CURSOR": "c1", "CODE_LINE": "12"}
+        for _ in range(7):
+            st.keep_example("demo_rule", ev, 1)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM rule_events").fetchone()[0], 5)
+        self.rs.by_source["kernel"][0]["regex"] = r"boom (?P<n>\d+)"
+        self.rs._compile("kernel")
+        (rule,) = label_sources.Rules(self.db, self.rs).items()
+        ctx = {p.id: p for p in rule.context}
+        self.assertEqual(ctx["captured1"].text, "n=7")
+        self.assertEqual(ctx["event1"].kind, "fields")
+        self.assertEqual(ctx["event1"].text.splitlines(),
+                         ["MESSAGE=boom 7", "CODE_LINE=12", "PRIORITY=3",
+                          "_SYSTEMD_UNIT=x.service", "__CURSOR=c1"])
+        self.assertNotIn("event4", ctx)                          # three shown
+        self.assertEqual(rule.live[0].id, "stats")
+        st.alert("demo_rule", "watch", "boom", {"event": ev, "t": 5, "groups": {"n": "7"}})
+        alert = next(iter(label_sources.Alerts(self.db).items()))
+        self.assertEqual([p.id for p in alert.context][:2], ["event", "data"])
+        self.assertEqual(alert.context[1].text, "n=7")
 
     def test_sync_through_store(self):
         store = Store(":memory:")

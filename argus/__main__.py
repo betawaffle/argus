@@ -156,6 +156,11 @@ def main():
     rx = r.add_parser("reset", help="start over: set the rules aside, clear "
                       "the engine's state (the scan's findings stay)")
     rx.set_defaults(func=engine.reset)
+    re_ = r.add_parser("examples", help="keep whole example events for rules from "
+                       "a journal window (read-only otherwise), for the labeling page")
+    re_.add_argument("--host", default="local")
+    re_.add_argument("--since", default="-7d", help="journal window start (default -7d)")
+    re_.set_defaults(func=engine.examples)
     rl = r.add_parser("list", help="show rules with hit counts")
     rl.set_defaults(func=cmd_rules_list)
     args = ap.parse_args()
