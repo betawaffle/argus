@@ -402,6 +402,27 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(eng.db.execute("SELECT summary FROM alerts").fetchall(),
                          [("new u9",)])
 
+    def test_backfill_is_baseline(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        llm = FakeLLM([{"name": "unit_started", "regex": r"Started (?P<unit>\S+) now",
+                        "actions": [{"block": "distinct", "field": "unit", "on_new": {
+                            "block": "flag", "severity": "watch", "summary": "new {new}"}}],
+                        "reason": "x"}])
+        eng = engine.Engine("local", db=sqlite3.connect(":memory:"), ruleset=rs,
+                            llm=llm, log=lambda m: None)
+        day1 = [ev(f"Started u{i} now", cursor=f"c{i}") for i in range(3)]
+        day2 = [ev("Started u7 now", cursor="c7"), ev("Started u8 now", cursor="c8")]
+        eng.backfill([("day 1", day1), ("day 2", day2)])
+        # a value first seen in a later window is still history: no alert
+        self.assertEqual(eng.db.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+        self.assertEqual(eng.cursor(), "c8")   # watching continues from the end
+        eng2 = engine.Engine("local", db=eng.db, ruleset=rs, llm=llm, log=lambda m: None)
+        eng2.run(events_iter=[ev("Started u9 now", cursor="c9")])
+        self.assertEqual(eng.db.execute("SELECT summary FROM alerts").fetchall(),
+                         [("new u9",)])
+        with self.assertRaises(SystemExit):     # only from a fresh start
+            eng2.backfill([("again", day1)])
+
     def test_shape_with_durations(self):
         from argus.patterns import template
         a = "magicsock: 2 active derp conns: derp-9=cr10h28m0s,wr10h28m0s"

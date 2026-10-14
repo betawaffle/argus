@@ -164,7 +164,19 @@ def main():
     ri = r.add_parser("import-requests", help="record argus's model traffic of "
                       "the last 3 days from its transcripts, so the model server's "
                       "lines about it aren't learned")
+    ri.add_argument("--all", action="store_true",
+                    help="every transcript, not just the last 3 days (for backfill)")
     ri.set_defaults(func=engine.import_requests)
+    rb = r.add_parser("backfill", help="first run over the whole journal, in "
+                      "windows, oldest first; then watching continues from the end. "
+                      "Needs a fresh start (rules reset) and import-requests --all")
+    rb.add_argument("--host", default="local")
+    rb.add_argument("--hours", type=float, default=24, help="window size (default 24)")
+    rb.add_argument("--learn", type=int, default=40,
+                    help="max rules to learn per window (default 40)")
+    rb.add_argument("--investigate", type=int, default=3,
+                    help="max investigations at the end")
+    rb.set_defaults(func=engine.backfill)
     rl = r.add_parser("list", help="show rules with hit counts")
     rl.set_defaults(func=cmd_rules_list)
     args = ap.parse_args()

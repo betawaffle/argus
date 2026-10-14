@@ -428,3 +428,20 @@ were skipped too and will be learned later, when the model serves someone
 else while argus is idle. In steady state, other people's model traffic
 during an argus request isn't learned from. Narrowing the skip to argus's own
 llama-server slot or task would fix that if it matters.
+
+## Backfill
+
+`python -m argus rules backfill` is the first run over the whole journal,
+replacing the "watch from now on" first run. It needs a fresh start
+(`rules reset`) and `rules import-requests --all`, so the model server's
+lines about argus's own past requests aren't learned.
+
+The history is replayed in windows (24 hours by default), oldest first. Each
+window is an ordinary batch: dispatch, learn up to `--learn` rules (40 by
+default), and carry the rest to the next window as pending. That keeps
+memory to one window, and thresholds are judged against a window's worth of
+lines. All of it counts as baseline: distinct and track record values but
+don't alert, even for values first seen in a later window. Thresholds still
+fire, so the alerts show what the rules would have said about the past.
+Investigations run once at the end, and the cursor is left at the end of
+the journal, so the timer picks up from there.

@@ -6,7 +6,7 @@ and learn rules for whatever nothing matched.
 Flow of one run:
 1. Read events after the saved cursor. The first run only records the
    current end of the journal: watching starts from "now". Backfill of older
-   history is a separate step.
+   history is a separate step (`rules backfill`, see Engine.backfill).
 2. Each event goes to its source's rules; the first match wins and its
    actions run. Flagged rules also collect their lines until reviewed.
    Unit-stdout copies of container lines are skipped (see
@@ -73,6 +73,7 @@ class Engine:
         self.learner = Learner(self.rules, llm=llm)
         self.log = log
         self.new_rules = set()   # learned this run: their first lines are a baseline
+        self.backfilling = False  # replaying history: all of it is baseline
 
     # --- cursor ---------------------------------------------------------------
     def cursor(self):
@@ -95,7 +96,7 @@ class Engine:
         self.state.hit(rule["name"], t)
         self.state.keep_example(rule["name"], event, t)
         ctx = {"rule": rule["name"], "event": event, "groups": groups,
-               "t": t, "state": self.state, "quiet": rule["name"] in self.new_rules}
+               "t": t, "state": self.state, "quiet": self.backfilling or rule["name"] in self.new_rules}
         actions = rule.get("actions", [])
         if rule.get("flagged") and not any(a.get("block") == "collect" for a in actions):
             actions = actions + [{"block": "collect"}]
@@ -115,7 +116,7 @@ class Engine:
             return
         groups = defaultdict(list)   # (source, shape) -> events
         n = matched = mirrored = own = 0
-        self._own = llm_requests(time.time() - 3 * 86400)
+        self._own = llm_requests(0 if self.backfilling else time.time() - 3 * 86400)
         for e in self._pending():
             self._sort(e, groups)
         source_lines = defaultdict(list)   # this batch's lines per source, for checks
@@ -186,13 +187,36 @@ class Engine:
             self.db.commit()
 
         self._save_pending(groups)
-        prune_requests(time.time() - 3 * 86400)
+        if not self.backfilling:
+            prune_requests(time.time() - 3 * 86400)
         self.db.execute(
             "INSERT INTO runs (t, host, events, matched, learned, pending, seconds) "
             "VALUES (?,?,?,?,?,?,?)",
             (t0, self.host, n, matched, learned, sum(map(len, groups.values())),
              round(time.time() - t0, 1)))
         self.db.commit()
+        self.investigate(investigate_limit)
+
+    def backfill(self, windows, learn_limit=40, investigate_limit=3):
+        """The first run over existing history: one batch per window, oldest
+        first, then watching continues from the end of the last one.
+
+        Each window is a normal batch (learning, pending carried to the
+        next), so memory stays bounded by one window and thresholds are
+        judged against a window's worth of lines. All of it is baseline:
+        distinct and track record values but don't alert. Thresholds still
+        fire, so the alerts show what the rules would have said.
+        Investigations wait until the end."""
+        if self.cursor() is not None or self.db.execute(
+                "SELECT count(*) FROM learned").fetchone()[0]:
+            raise SystemExit("backfill needs a fresh start: run `rules reset` first")
+        self.backfilling = True
+        try:
+            for label, batch in windows:
+                self.log(f"backfill: {label}")
+                self.run(learn_limit=learn_limit, investigate_limit=0, events_iter=batch)
+        finally:
+            self.backfilling = False
         self.investigate(investigate_limit)
 
     def _is_own(self, src, t):
@@ -288,10 +312,34 @@ def examples(args):
     print(f"kept {eng.keep_examples(args.since)} example events")
 
 
+def backfill(args):
+    eng = Engine(args.host, log=lambda m: print(m, file=sys.stderr, flush=True))
+    start = events.first_time(args.host)
+    if start is None:
+        raise SystemExit("the journal is empty")
+    step = args.hours * 3600
+
+    def windows():
+        t = start
+        while True:
+            end = t + step
+            last = end >= time.time()
+            label = (time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) + " to "
+                     + ("now" if last else time.strftime("%Y-%m-%d %H:%M",
+                                                         time.localtime(end))))
+            yield label, events.window(args.host, t, None if last else end)
+            if last:
+                return
+            t = end
+
+    eng.backfill(windows(), learn_limit=args.learn, investigate_limit=args.investigate)
+
+
 def import_requests(args):
     """Record past model traffic from transcripts (see llm.import_transcripts)."""
     from .llm import import_transcripts
-    n = import_transcripts(DATA_DIR / "transcripts", time.time() - 3 * 86400)
+    since = 0 if args.all else time.time() - 3 * 86400
+    n = import_transcripts(DATA_DIR / "transcripts", since)
     print(f"{n} request windows recorded from transcripts")
 
 

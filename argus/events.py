@@ -81,8 +81,8 @@ def source(event):
     return "unknown/" + event.get("SYSLOG_IDENTIFIER", "?")
 
 
-def read(host="local", cursor=None, since=None, extra=()):
-    """Yield events after cursor (or since a time), all priorities.
+def read(host="local", cursor=None, since=None, until=None, extra=()):
+    """Yield events after cursor (or since a time, up to until), all priorities.
 
     MESSAGE is decoded to a string up front, so nothing else has to care.
     """
@@ -91,6 +91,8 @@ def read(host="local", cursor=None, since=None, extra=()):
         argv += ["--after-cursor", cursor]
     elif since:
         argv += ["--since", since]
+    if until:
+        argv += ["--until", until]
     if host != "local":
         argv = ["ssh", "-o", "BatchMode=yes", host, shlex.join(argv)]
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True,
@@ -200,6 +202,28 @@ def join_multiline(events):
     if rest and last_cursor:
         rest[-1]["__CURSOR"] = last_cursor
     yield from rest
+
+
+def first_time(host="local"):
+    """Time of the oldest event in the journal (None if it's empty)."""
+    argv = ["journalctl", "-o", "json", "--no-pager",
+            "--output-fields=__REALTIME_TIMESTAMP"]
+    if host != "local":
+        argv = ["ssh", "-o", "BatchMode=yes", host, shlex.join(argv)]
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True)
+    line = proc.stdout.readline()
+    proc.kill()
+    proc.wait()
+    return int(json.loads(line)["__REALTIME_TIMESTAMP"]) / 1e6 if line else None
+
+
+def window(host, start, end=None):
+    """Events with start <= time < end (end None: up to now), whole seconds."""
+    for e in read(host, since=f"@{int(start)}",
+                  until=f"@{int(end) + 1}" if end else None):
+        t = int(e.get("__REALTIME_TIMESTAMP", 0)) / 1e6
+        if t >= start and (end is None or t < end):
+            yield e
 
 
 def latest_cursor(host="local"):
