@@ -183,6 +183,19 @@ class TestBlocks(unittest.TestCase):
             self.run_rule(a, {"user": u})
         self.assertEqual(self.alerts(), [("watch", "new a"), ("watch", "new b")])
 
+    def test_threshold_n_and_quiet(self):
+        self.run_rule([{"block": "threshold", "n": 2, "then": {
+            "block": "flag", "severity": "watch", "summary": "over {n}"}}], n=2)
+        self.assertEqual(self.alerts(), [("watch", "over 2")])
+        a = [{"block": "distinct", "field": "u",
+              "on_new": {"block": "flag", "severity": "watch", "summary": "new {new}"}}]
+        ctx = {"rule": "q", "event": ev("m"), "groups": {"u": "a"}, "t": 1,
+               "state": self.state, "quiet": True}
+        blocks.run_actions(a, ctx)          # baseline: recorded, no alert
+        blocks.run_actions(a, {**ctx, "quiet": False})
+        blocks.run_actions(a, {**ctx, "quiet": False, "groups": {"u": "b"}})
+        self.assertEqual(self.alerts()[1:], [("watch", "new b")])
+
     def test_distinct_new_and_unknown_placeholders(self):
         a = [{"block": "distinct", "field": "peer",
               "on_new": {"block": "flag", "severity": "watch",
@@ -266,6 +279,72 @@ class TestEngine(unittest.TestCase):
                          {"slot_release": 1})
         self.assertEqual(eng.db.execute("SELECT count(*) FROM pending").fetchone()[0], 0)
         self.assertEqual(eng.cursor(), "c3")
+
+    def test_join_traceback(self):
+        t = 1_760_000_000
+        c = {"CONTAINER_ID": "w"}
+        lines = ["Traceback (most recent call last):",
+                 '  File "/app/x.py", line 3, in f', "    return d[k]",
+                 "           ^^^^", "KeyError: 'Session not found'"]
+        batch = [ev("before", cursor="c0", t=t, **c)]
+        batch += [ev(m, cursor=f"c{i + 1}", t=t + 0.01 * i, **c) for i, m in enumerate(lines)]
+        batch.insert(3, ev("other process", cursor="x", t=t, _PID="9"))
+        batch.append(ev("after", cursor="c9", t=t + 1, **c))
+        out = list(events.join_multiline(batch))
+        msgs = [e["MESSAGE"] for e in out]
+        self.assertEqual(msgs, ["before", "other process", "\n".join(lines), "after"])
+        self.assertEqual(out[2]["__LINES"], 5)
+        self.assertNotIn("__CURSOR", out[2])
+        # a traceback at the very end still advances the cursor
+        tail = list(events.join_multiline(batch[:-1]))
+        self.assertEqual(tail[-1]["__CURSOR"], "c5")
+
+    def test_join_loguru_traceback(self):
+        # The shape Open WebUI (loguru + asyncio) writes, abridged.
+        lines = [
+            "2026-10-14 12:00:00.000 | ERROR    | asyncio.runners:run:118 - "
+            "Task exception was never retrieved",
+            "future: <Task finished name='Task-9' coro=<f() done> exception=KeyError()>",
+            "Traceback (most recent call last):",
+            '  File "/x/engineio/base_server.py", line 237, in _get_socket',
+            "    s = self.sockets[sid]",
+            "KeyError: None",
+            "",
+            "During handling of the above exception, another exception occurred:",
+            "",
+            "Traceback (most recent call last):",
+            '> File "/x/socketio/async_server.py", line 619, in _handle_event_internal',
+            "    r = await server._trigger_event(data[0], namespace, sid, *data[1:])",
+            "    │       └ <socketio.AsyncServer object>",
+            '  File "/app/socket/main.py", line 300, in get_session',
+            "    raise KeyError('Session not found')",
+            "KeyError: 'Session not found'",
+        ]
+        c = {"CONTAINER_ID": "w"}
+        batch = [ev(m, cursor=f"c{i}", t=1_760_000_000 + 0.001 * i, **c)
+                 for i, m in enumerate(lines)]
+        batch.append(ev("INFO: GET /api/v1/chats", cursor="c99", t=1_760_000_001, **c))
+        out = list(events.join_multiline(batch))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["__LINES"], len(lines))
+        self.assertIn("Session not found", out[0]["MESSAGE"])
+
+    def test_new_rule_is_quiet_in_its_first_run(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        llm = FakeLLM([{"name": "unit_started", "regex": r"Started (?P<unit>\S+) now",
+                        "actions": [{"block": "distinct", "field": "unit", "on_new": {
+                            "block": "flag", "severity": "watch", "summary": "new {new}"}}],
+                        "reason": "x"}])
+        eng = engine.Engine("local", db=sqlite3.connect(":memory:"), ruleset=rs,
+                            llm=llm, log=lambda m: None)
+        eng.run(learn_limit=1, events_iter=[ev(f"Started u{i} now", cursor=f"c{i}")
+                                            for i in range(3)])
+        self.assertEqual(eng.db.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+        eng2 = engine.Engine("local", db=eng.db, ruleset=rs, llm=llm, log=lambda m: None)
+        eng2.run(learn_limit=1, events_iter=[ev("Started u1 now", cursor="c7"),
+                                             ev("Started u9 now", cursor="c8")])
+        self.assertEqual(eng.db.execute("SELECT summary FROM alerts").fetchall(),
+                         [("new u9",)])
 
     def test_proposal_cap(self):
         rs = rules.RuleSet(tempfile.mkdtemp())

@@ -10,7 +10,8 @@ Flow of one run:
 2. Each event goes to its source's rules; the first match wins and its
    actions run. Flagged rules also collect their lines until reviewed.
    Unit-stdout copies of container lines are skipped (see
-   events.mark_mirrored).
+   events.mark_mirrored), and traceback lines are joined into one event
+   (events.join_multiline).
 3. Unmatched events are grouped by source and rough shape. The biggest
    groups (up to --learn) go to the model, one group per rule. After each
    new rule, the remaining groups are re-checked against it.
@@ -63,6 +64,7 @@ class Engine:
         self.llm = llm
         self.learner = Learner(self.rules, llm=llm)
         self.log = log
+        self.new_rules = set()   # learned this run: their first lines are a baseline
 
     # --- cursor ---------------------------------------------------------------
     def cursor(self):
@@ -84,7 +86,7 @@ class Engine:
         t = blocks.event_time(event)
         self.state.hit(rule["name"], t)
         ctx = {"rule": rule["name"], "event": event, "groups": groups,
-               "t": t, "state": self.state}
+               "t": t, "state": self.state, "quiet": rule["name"] in self.new_rules}
         actions = rule.get("actions", [])
         if rule.get("flagged") and not any(a.get("block") == "collect" for a in actions):
             actions = actions + [{"block": "collect"}]
@@ -108,7 +110,7 @@ class Engine:
             self._sort(e, groups)
         source_lines = defaultdict(list)   # recent lines per source, for checks
         stream = events_iter if events_iter is not None else events.read(self.host, cursor)
-        for e in events.mark_mirrored(stream):
+        for e in events.join_multiline(events.mark_mirrored(stream)):
             n += 1
             cursor = e.get("__CURSOR", cursor)
             if e.get("__MIRRORED"):  # the container copy of the line is handled
@@ -138,8 +140,12 @@ class Engine:
             (src, shape), evs = max(todo.items(), key=lambda kv: len(kv[1]))
             tried.add((src, shape))
             self.log(f"learning [{src}] {len(evs)}x {shape[:100]!r}")
-            rule, ok, transcript = self.learner.learn(src, evs, source_lines.get(src, []))
+            others = sorted(((k[1], len(v)) for k, v in groups.items()
+                             if k[0] == src and k != (src, shape)), key=lambda x: -x[1])
+            rule, ok, transcript = self.learner.learn(src, evs, source_lines.get(src, []),
+                                                      others=others)
             learned += 1
+            self.new_rules.add(rule["name"])
             self.db.execute(
                 "INSERT INTO learned (t, host, source, rule, accepted, lines, "
                 "transcript) VALUES (?,?,?,?,?,?,?)",
@@ -202,6 +208,26 @@ class Engine:
                             "transcript=? WHERE id=?",
                             (status, report, str(agent.transcript), iid))
             self.db.commit()
+
+
+RESET_TABLES = ("rule_stats", "counters", "extracts", "collected", "alerts",
+                "investigations", "tracked", "distinct_values", "engine_cursors",
+                "pending", "learned", "runs")
+
+
+def reset(args):
+    """Start the rule engine over: set the rules repo aside and clear its
+    state. The older scan's findings are left alone."""
+    from .rules import RULES_DIR
+    if RULES_DIR.exists():
+        aside = RULES_DIR.with_name(RULES_DIR.name + time.strftime(".old-%Y%m%d-%H%M%S"))
+        RULES_DIR.rename(aside)
+        print(f"rules moved to {aside}")
+    db = sqlite3.connect(DATA_DIR / "argus.db")
+    for table in RESET_TABLES:
+        db.execute(f"DROP TABLE IF EXISTS {table}")
+    db.commit()
+    print("rule engine state cleared")
 
 
 def main(args):

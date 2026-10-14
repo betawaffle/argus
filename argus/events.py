@@ -132,6 +132,76 @@ def mark_mirrored(events, chunk=2000):
     yield from flush()
 
 
+# A block starts at a traceback, or at asyncio's "Task exception was never
+# retrieved" (logged just before its future: line and traceback).
+TRACEBACK = re.compile(r"Traceback \(most recent call last\):\s*$"
+                       r"|Task exception was never retrieved\s*$")
+CONTINUES = re.compile(
+    r"^(\s|$)"                                    # indented frame / code line
+    r"|^\^+\s*$"                                  # caret markers
+    r"|^>\s*File \""                              # loguru marks the catching frame
+    r"|^future: <"                                 # asyncio's task line
+    r"|^(During handling of the above|The above exception was)"
+    r"|^Traceback \(most recent call last\)"
+    r"|^[A-Za-z_][\w.]*(Error|Exception|Exit|Interrupt|Warning|Group)\b")
+MAX_JOIN = 200       # lines per joined event
+JOIN_GAP = 2.0       # seconds between lines of one traceback, at most
+
+
+def _t(e):
+    return int(e.get("__REALTIME_TIMESTAMP", 0)) / 1e6
+
+
+def join_multiline(events):
+    """Join each Python traceback into one event.
+
+    Programs write a traceback as one journal line per frame. Learned line by
+    line, one error becomes a dozen rules that disagree with each other.
+    A block starts at "Traceback (most recent call last):" and takes the
+    following lines from the same process (or container) that look like
+    part of a traceback. The joined event keeps the first line's fields;
+    MESSAGE holds all the lines, __LINES their count.
+
+    Joined events carry no __CURSOR (other processes' lines may already have
+    been passed on with later cursors), except the last one flushed at the
+    end, which gets the stream's final cursor so nothing is read twice.
+    """
+    open_blocks = {}   # key -> [events]
+    last_cursor = None
+
+    def key(e):
+        return (e.get("_SYSTEMD_UNIT"), e.get("CONTAINER_ID") or e.get("_PID"))
+
+    def joined(block):
+        first = dict(block[0])
+        first.pop("__CURSOR", None)
+        first["MESSAGE"] = "\n".join(e["MESSAGE"].rstrip("\n") for e in block)
+        first["__LINES"] = len(block)
+        return first
+
+    for e in events:
+        last_cursor = e.get("__CURSOR", last_cursor)
+        if e.get("__MIRRORED"):
+            yield e
+            continue
+        k = key(e)
+        block = open_blocks.get(k)
+        if block is not None:
+            if (CONTINUES.match(e["MESSAGE"]) and len(block) < MAX_JOIN
+                    and _t(e) - _t(block[-1]) <= JOIN_GAP):
+                block.append(e)
+                continue
+            yield joined(open_blocks.pop(k))
+        if TRACEBACK.search(e["MESSAGE"]):
+            open_blocks[k] = [e]
+        else:
+            yield e
+    rest = [joined(b) for b in open_blocks.values()]
+    if rest and last_cursor:
+        rest[-1]["__CURSOR"] = last_cursor
+    yield from rest
+
+
 def latest_cursor(host="local"):
     """Cursor of the newest entry, to start watching from "now"."""
     events = list(read(host, extra=("-n", "1")))
@@ -142,6 +212,9 @@ def summarize(event, max_message=500):
     """The event without its volatile fields, for showing to the model."""
     out = {k: v for k, v in event.items()
            if k in MATCHABLE or k in ("MESSAGE", "SYSLOG_IDENTIFIER")}
-    out["MESSAGE"] = out.get("MESSAGE", "")[:max_message]
+    msg = out.get("MESSAGE", "")
+    if len(msg) > max_message:  # keep the end too: a traceback's error is last
+        msg = msg[:max_message // 2] + "\n…\n" + msg[-max_message // 2:]
+    out["MESSAGE"] = msg
     out["source"] = source(event)
     return out

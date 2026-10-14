@@ -153,6 +153,9 @@ def main():
                     "(e.g. -2h) instead of resuming from the saved cursor. Use "
                     "with scratch ARGUS_DATA and ARGUS_RULES.")
     rr.set_defaults(func=engine.main)
+    rx = r.add_parser("reset", help="start over: set the rules aside, clear "
+                      "the engine's state (the scan's findings stay)")
+    rx.set_defaults(func=engine.reset)
     rl = r.add_parser("list", help="show rules with hit counts")
     rl.set_defaults(func=cmd_rules_list)
     args = ap.parse_args()
