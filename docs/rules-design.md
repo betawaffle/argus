@@ -53,12 +53,11 @@ things later.
 - **Rules must not be too broad.** A rule that matches all or nearly all
   lines (from its source, or overall) is rejected or flagged. Measure this by
   replaying it against a recent journal window.
-  Since 2026-10-14 the check counts the lines it matches beyond the shapes
-  of its examples, and rejects it only when (a) it matches 95% or more of a
-  recent window of 50+ lines and some of those are of other shapes, or (b)
-  it matches other-shaped lines more severe than any of its examples, at
-  warning or worse. Matching many shapes on its own is fine: the earlier
-  "more than 20 shapes" limit rejected good rules.
+  Since 2026-10-14 a rule is rejected only when (a) it covers more than 20
+  shapes and over 95% of the source's shapes in the batch, or (b) it matches
+  other-shaped lines more severe than any of its examples, at warning or
+  worse. More than 20 shapes otherwise is accepted and flagged for review:
+  the earlier hard "more than 20 shapes" limit rejected good rules.
 - **Fallbacks are templates, and they count and keep lines.** When the
   model's rules are all rejected, argus writes `unlearned_<source>_N` with a
   regex built from the group's template (numbers, IPs, hex and UUIDs become
@@ -329,3 +328,56 @@ adding). What was still wrong, and the fix:
   endpoints, llm-server 11 for one request's steps. The model now sees the
   other unmatched shapes from the same source and is asked to cover the same
   kind of line with one rule.
+
+## Trial run 3 (2026-10-14)
+
+8,774 lines, 241 groups, 40 rules but 10 of them fallbacks, 50 minutes, 0
+alerts. The prompt now asked for one rule per kind of line, but the "too
+broad" check rejected exactly those rules (33-109 shapes against a limit of
+20), so the model retried until it ran out of attempts. Fixes:
+
+- **Broad isn't rejected, it's flagged.** A rule covering more than 20 shapes
+  is accepted and flagged for review. It's only rejected when it covers more
+  than 80% of the source's shapes (a match-almost-everything rule).
+- **Merging is spelled out.** The overlap message now says how to merge into
+  the older rule (`name=<older>`, `replace=true`), since an early broad rule
+  otherwise blocks every later one.
+- **Thresholds**: 3-5x the normal daily volume, not "well above" (trial 3 set
+  one at 40x, so it would never fire).
+- **Shapes with durations.** tailscaled logs connection ages glued to words
+  (`derp-9=cr10h28m0s`), so its line had a new shape every minute. Every
+  learn slot of a 10-minute batch went to those, and each exact-line
+  fallback never matched again. `template()` now turns durations into
+  `<DUR>`, even inside a word. Fallbacks now match the line's shape (its
+  text, with the varying parts left open) rather than the exact line.
+
+## Trial run 4 (2026-10-14)
+
+17,340 lines (llm-server was busy), 287 groups, 28 rules and 12 fallbacks,
+43 minutes, 0 alerts. Open WebUI went from 12 rules to 5. Fixes:
+
+- **Fallbacks blocked real rules.** "Overlaps with older rule
+  unlearned_tailscaled_service_1" was the most common rejection: a fallback
+  from earlier in the same run, which the model can't merge into. Fallbacks
+  are now marked `fallback = true`, don't count in the overlap check, and a
+  real rule that covers a fallback's sample replaces it.
+- **Too broad at 80% was too strict.** Open WebUI is almost all GET requests,
+  so one GET rule covered 32 of its 36 shapes. Now only above 95% is rejected;
+  anything over 20 shapes is still flagged for review.
+- **Thresholds overshot** (6-17x normal). The task now names a number:
+  "about n=X per day (4x normal)".
+
+## Trial run 5 (2026-10-14)
+
+23,768 lines, 150 groups, **22 rules, all accepted, nothing pending, 9
+minutes**. Follow-up 10-minute batches took under a second and learned
+nothing new. tailscaled went from 17 rules to 2.
+
+The one bad part was thresholds: from 75,000x normal to 1.05x. The rate the
+model was shown came from the 20 example lines over their own time span (a
+burst of seconds read as millions a day), and for a rule covering several
+groups it saw one group's rate. Fix: argus now checks thresholds itself. It
+counts what the proposed regex matches in the batch, over the hours the batch
+covers, and rejects n below 2x normal or above 10x (with a suggested n of 4x).
+The task shows the group's rate over the whole batch. Batches shorter than an
+hour aren't used for this.

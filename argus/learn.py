@@ -50,8 +50,9 @@ How to choose actions:
 - routine, expected chatter: ignore, or count if the volume might matter
 - errors and warnings: count, plus threshold to flag when it gets frequent;
   flag directly (attention) only for things a human must fix soon
-- a threshold's n must be well above the normal volume shown for the group:
-  lines that are routine at that rate (renewals, keepalives, reconnects)
+- a threshold's n should be about 4 times the normal volume for its window,
+  so it fires on a real burst but not on a normal day (argus checks this).
+  Lines that are routine at that rate (renewals, keepalives, reconnects)
   should not alert at all. In summaries say "reached {{n}}", since the alert
   fires once when the count reaches n
 - one rule per kind of line: requests to different URLs, or the steps of one
@@ -99,6 +100,7 @@ class Learner:
     def __init__(self, ruleset, llm=None):
         self.ruleset = ruleset
         self.llm = llm
+        self.hours = None   # hours the current batch covers, if long enough
 
     def learn(self, src, examples, recent=(), others=()):
         """Make a rule for examples (events from src). Returns (rule, accepted,
@@ -122,7 +124,7 @@ class Learner:
                     existing.get("samples", []) + rule["samples"]))[:rules.MAX_SAMPLES]
                 old_samples = [{"MESSAGE": s} for s in existing.get("samples", [])]
                 problems = rules.check(rule, src, _without(self.ruleset, name),
-                                       examples, recent)
+                                       examples, recent, self.hours)
                 if not problems and rule.get("regex"):
                     c = rules.Compiled(rule)
                     missed = [s for s in old_samples
@@ -131,25 +133,32 @@ class Learner:
                         problems.append("the merged rule no longer matches the old "
                                         f"rule's sample {missed[0]['MESSAGE'][:200]!r}")
             else:
-                problems = rules.check(rule, src, self.ruleset, examples, recent)
+                problems = rules.check(rule, src, self.ruleset, examples, recent,
+                                       self.hours)
             unknown = [p for p in problems if "unknown block" in p]
-            real = [p for p in problems if p not in unknown]
+            review = [p for p in problems if p.startswith("review: ")]
+            real = [p for p in problems if p not in unknown and p not in review]
             if real:
                 outcome["problems"] = real
                 outcome["last"] = {k: v for k, v in proposal.items() if v}
                 if outcome["proposals"] >= MAX_PROPOSALS:
                     return "problem: too many attempts; stop now."
                 return "problems:\n- " + "\n- ".join(real)
+            notes = []
             if unknown:  # valid apart from blocks we don't have yet
+                notes.append("proposes new building blocks: " + "; ".join(unknown))
+            notes += [p[len("review: "):] for p in review]
+            if notes:
                 rule["flagged"] = True
-                rule["review"] = "proposes new building blocks: " + "; ".join(unknown)
+                rule["review"] = "; ".join(notes)
             why = reason or "learned"
             if replace and existing is not None:
                 self.ruleset.replace(src, rule, why)
             else:
                 self.ruleset.add(src, rule, why)
             outcome["rule"] = rule
-            return "accepted" + (" (flagged for review: new building block)" if unknown else "")
+            return "accepted" + (f" (flagged for review: {rule['review'][:200]})"
+                                 if notes else "")
 
         def test_regex(regex):
             try:
@@ -190,7 +199,8 @@ class Learner:
     def _task(self, src, examples, others=()):
         existing = self.ruleset.by_source.get(src, [])
         lines = [f"Source: {src}", f"Unmatched lines in this group: {len(examples)}"
-                 + _rate(examples), "", "Example events (volatile fields removed):"]
+                 + _rate(len(examples), self.hours), "",
+                 "Example events (volatile fields removed):"]
         seen = set()
         for e in examples:
             if e["MESSAGE"] in seen:
@@ -219,15 +229,15 @@ class Learner:
         return f"unlearned_{base}_{n}"
 
 
-def _rate(examples):
-    """How often these lines arrive, so thresholds can sit above normal."""
-    from .blocks import event_time
-    ts = [event_time(e) for e in examples]
-    span = (max(ts) - min(ts)) / 3600 if ts else 0
-    if len(ts) < 2 or span <= 0:
+def _rate(n, hours):
+    """How often these lines arrive, so thresholds can sit above normal.
+    Measured over the whole batch, not the examples' own span: 20 lines in a
+    burst of seconds aren't millions a day."""
+    if not hours:
         return ""
-    return (f" over {span:.1f} hours, about {len(ts) / span * 24:.0f} a day at this "
-            "rate (normal volume: set thresholds well above it)")
+    return (f" in the last {hours:.1f} hours, about {n / hours * 24:.0f} a day. "
+            "argus checks thresholds against the rate your rule's regex actually "
+            "matches in that time")
 
 
 def _without(ruleset, name):

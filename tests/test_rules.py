@@ -97,6 +97,23 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(rules.check(r, "demo.service", self.rs,
                                      [ev("Started x", MESSAGE_ID="39f5")]), [])
 
+    def test_threshold_against_rate(self):
+        # 60 matching lines in 6 hours: 240 a day is normal.
+        lines = [ev(f"disk sd{i % 3} slow") for i in range(60)]
+        def with_n(n):
+            return self.rule(regex=r"disk (?P<d>\w+) slow", actions=[
+                {"block": "threshold", "n": n, "then": {
+                    "block": "flag", "severity": "watch", "summary": "x"}}])
+        low = rules.check(with_n(300), "demo.service", self.rs, lines[:1], lines, 6)
+        self.assertTrue(any("too low" in x and "n=960" in x for x in low), low)
+        high = rules.check(with_n(50000), "demo.service", self.rs, lines[:1], lines, 6)
+        self.assertTrue(any("too high" in x for x in high), high)
+        self.assertEqual(rules.check(with_n(960), "demo.service", self.rs,
+                                     lines[:1], lines, 6), [])
+        # No idea of the rate (short batch): not checked.
+        self.assertEqual(rules.check(with_n(5), "demo.service", self.rs,
+                                     lines[:1], lines), [])
+
     def test_identity_field(self):
         r = self.rule(regex=r"^(?P<up>[\d.]+) srv slot (?P<slot>\d)", actions=[
             {"block": "distinct", "field": "up",
@@ -130,15 +147,21 @@ class TestCheck(unittest.TestCase):
         same = [ev(f"thing {i} happened") for i in range(50)]
         self.assertEqual(rules.check(self.rule(regex=r"thing (?P<n>\d+) happened"),
                                      "demo.service", self.rs, same[:1], same), [])
-        # Many different shapes are fine on their own (routine chatter)...
+        # Many shapes, nearly all of the source's: too broad.
         mixed = [ev(f"{i} {'x' * i} happened {'y' * (30 - i)}") for i in range(1, 30)]
+        p = rules.check(self.rule(regex=r"^(?P<n>\d+) .* happened"), "demo.service",
+                        self.rs, mixed[:1], mixed)
+        self.assertTrue(any("too broad" in x for x in p), p)
+        # Many shapes, but a minority of the source's: accepted, for review.
+        other = [ev(f"other {'z' * i} line {'w' * (40 - i)}") for i in range(40)]
+        p = rules.check(self.rule(regex=r"^(?P<n>\d+) .* happened"), "demo.service",
+                        self.rs, mixed[:1], mixed + other)
+        self.assertEqual([x[:14] for x in p], ["review: broad,"])
+        # Matching nearly every line from the source is too broad.
         noise = [ev(f"other line {'z' * i}") for i in range(30)]
-        self.assertEqual(rules.check(self.rule(regex=r"^(?P<n>\d+) .* happened"),
-                                     "demo.service", self.rs, mixed[:1], mixed + noise), [])
-        # ...but matching nearly every line from the source is too broad.
         p = rules.check(self.rule(regex=r"(?P<x>.*)(?:happened|other line)"), "demo.service",
                         self.rs, mixed[:1], mixed + noise)
-        self.assertTrue(any("nearly all" in x for x in p), p)
+        self.assertTrue(any(x.startswith("too broad: matches") for x in p), p)
 
     def test_too_broad_swallows_errors(self):
         info = [ev(f"peer status: {i} connected", PRIORITY="6") for i in range(5)]
@@ -158,7 +181,7 @@ class TestCheck(unittest.TestCase):
                               rejected={"regex": "derp", "actions": [{"block": "ignore"}]})
         c = rules.Compiled(rule)
         self.assertTrue(all(c.test(e) is not None for e in lines))
-        self.assertEqual(c.test(lines[2]), {"n1": "3", "ip1": "10.0.0.3:41641", "n2": "3.5"})
+        self.assertEqual(c.test(lines[2]), {"n1": "3", "ip1": "10.0.0.3:41641", "dur1": "3.5s"})
         self.assertIsNone(c.test(ev("derp-1 disconnected from 10.0.0.1:41641 after 1.5s")))
         self.assertEqual([a["block"] for a in rule["actions"]], ["count", "collect"])
         self.assertTrue(rule["flagged"])
@@ -378,6 +401,26 @@ class TestEngine(unittest.TestCase):
                                              ev("Started u9 now", cursor="c8")])
         self.assertEqual(eng.db.execute("SELECT summary FROM alerts").fetchall(),
                          [("new u9",)])
+
+    def test_shape_with_durations(self):
+        from argus.patterns import template
+        a = "magicsock: 2 active derp conns: derp-9=cr10h28m0s,wr10h28m0s"
+        b = "magicsock: 2 active derp conns: derp-9=cr10h29m0s,wr10h29m0s"
+        self.assertEqual(template(a), template(b))
+        self.assertEqual(template("ext4 on sda1, took 250ms"), "ext4 on sda1, took <DUR>")
+        r = rules.fallback([ev(a)], "unlearned_x_1", "test")
+        self.assertIsNotNone(rules.Compiled(r).test(ev(b)))
+        self.assertIsNone(rules.Compiled(r).test(ev("magicsock: something else")))
+
+    def test_rule_replaces_covered_fallback(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        rs.add("demo.service", rules.fallback([ev("derp-9 connected")],
+                                              "unlearned_demo_1", "t"), "fallback")
+        good = rules.make({"name": "derp_connected", "regex": r"derp-(?P<n>\d+) connected",
+                           "actions": [{"block": "count"}]}, [ev("derp-9 connected")])
+        self.assertEqual(rules.check(good, "demo.service", rs, [ev("derp-9 connected")]), [])
+        rs.add("demo.service", good, "t")
+        self.assertEqual([r["name"] for r in rs.all()], ["derp_connected"])
 
     def test_proposal_cap(self):
         rs = rules.RuleSet(tempfile.mkdtemp())
