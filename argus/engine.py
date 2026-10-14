@@ -85,6 +85,7 @@ class Engine:
             return False
         t = blocks.event_time(event)
         self.state.hit(rule["name"], t)
+        self.state.keep_example(rule["name"], event, t)
         ctx = {"rule": rule["name"], "event": event, "groups": groups,
                "t": t, "state": self.state, "quiet": rule["name"] in self.new_rules}
         actions = rule.get("actions", [])
@@ -154,8 +155,9 @@ class Engine:
             self.log(f"  -> {'rule' if ok else 'FALLBACK'} {rule['name']}: "
                      f"{json.dumps(rule.get('actions'))}")
             # The new rule handles its own lines, and maybe other groups too.
-            # (A fallback matches one exact line; the rest of its group waits
-            # in pending rather than being learned again this run.)
+            # (A fallback matches its group's template, so it covers the
+            # group; if it had to fall back to one exact line, the rest of the
+            # group waits in pending rather than being learned again this run.)
             for key in [k for k in groups if k[0] == src]:
                 left = [e for e in groups[key] if not self.dispatch(e, src)]
                 if left:
@@ -191,6 +193,25 @@ class Engine:
                     "INSERT INTO pending (host, source, shape, t, event) VALUES (?,?,?,?,?)",
                     (self.host, src, shape, blocks.event_time(e), json.dumps(e)))
 
+    # --- examples ---------------------------------------------------------------
+    def keep_examples(self, since, events_iter=None):
+        """Keep whole example events for rules that have none yet, from a window
+        of the journal. Only reads: no actions run, no counts change, no
+        cursor moves. Returns how many events were kept."""
+        stream = events_iter if events_iter is not None else events.read(
+            self.host, since=since)
+        before = self.db.execute("SELECT count(*) FROM rule_events").fetchone()[0]
+        for n, e in enumerate(events.join_multiline(events.mark_mirrored(stream)), 1):
+            if e.get("__MIRRORED"):
+                continue
+            rule, _ = self.rules.match(e)
+            if rule is not None:
+                self.state.keep_example(rule["name"], e, blocks.event_time(e))
+            if n % 5000 == 0:
+                self.db.commit()
+        self.db.commit()
+        return self.db.execute("SELECT count(*) FROM rule_events").fetchone()[0] - before
+
     # --- investigations ---------------------------------------------------------
     def investigate(self, limit):
         rows = self.db.execute(
@@ -210,7 +231,7 @@ class Engine:
             self.db.commit()
 
 
-RESET_TABLES = ("rule_stats", "counters", "extracts", "collected", "alerts",
+RESET_TABLES = ("rule_stats", "counters", "extracts", "collected", "alerts", "rule_events",
                 "investigations", "tracked", "distinct_values", "engine_cursors",
                 "pending", "learned", "runs")
 
@@ -228,6 +249,11 @@ def reset(args):
         db.execute(f"DROP TABLE IF EXISTS {table}")
     db.commit()
     print("rule engine state cleared")
+
+
+def examples(args):
+    eng = Engine(args.host, log=lambda m: print(m, file=sys.stderr))
+    print(f"kept {eng.keep_examples(args.since)} example events")
 
 
 def main(args):

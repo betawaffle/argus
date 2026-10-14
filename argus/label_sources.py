@@ -13,15 +13,48 @@ into labeler Items. Three sources:
 """
 
 import json
+import re
 import sqlite3
 import time
 
 from labeler import Item, Part, Source, paragraphs
 
-from .blocks import SCHEMA as BLOCKS_SCHEMA
+from .blocks import State
 from .rules import RuleSet, _toml_value
 
 SEVERITY_PRIORITY = {"attention": 3, "watch": 2, "?": 1}
+
+
+def _shape(text):
+    """Loose shape of a log pattern, for grouping near-duplicate findings:
+    placeholders, numbers and paths dropped, so two findings about the same
+    problem in different files or lines land together."""
+    text = re.sub(r"<[A-Z0-9]+>|/\S+|\d+", "", text or "")
+    return " ".join(text.split()).lower()[:120]
+
+
+def _field_order(k):
+    # MESSAGE, then fields the program set, then journald's (_X), then its
+    # addresses (__X)
+    return (k != "MESSAGE", k.startswith("_"), k.startswith("__"), k)
+
+
+def fields_text(d, limit=500):
+    """A dict as "key=value" lines (a labeler "fields" part). Newlines in
+    values are shown as ⏎ so each field stays on one line."""
+    lines = []
+    for k in sorted(d, key=_field_order):
+        v = d[k] if isinstance(d[k], str) else json.dumps(d[k], ensure_ascii=False)
+        v = v.replace("\n", " ⏎ ")
+        lines.append(f"{k}={v[:limit] + '…' if len(v) > limit else v}")
+    return "\n".join(lines)
+
+
+def _json(text, default):
+    try:
+        return json.loads(text) if text else default
+    except json.JSONDecodeError:
+        return default
 
 
 def _when(t):
@@ -69,7 +102,7 @@ class Reports(Source, _DB):
             context = [
                 Part("pattern", "code", tmpl or "", "log pattern"),
                 Part("sample", "code", sample or "", "example line"),
-                Part("where", "field", f"{host} {ident}, seen {total} times", "where"),
+                Part("where", "field", f"{host} {ident}", "where"),
             ]
             if fb or note:
                 context.append(Part("feedback", "field",
@@ -79,7 +112,8 @@ class Reports(Source, _DB):
                 title=f"{verdict}: {summary or '(no summary)'}",
                 parts=paragraphs(answer), context=context, question=self.QUESTION,
                 priority=SEVERITY_PRIORITY.get(verdict, 0) + (t or 0) / 1e10,
-                link=f"/f/{fid}")
+                link=f"/f/{fid}", group=f"finding|{host}|{ident}|{_shape(tmpl)}",
+                live=[Part("seen", "field", f"seen {total} times", "seen")])
 
     def _investigations(self):
         rows = self.db.execute(
@@ -97,31 +131,38 @@ class Reports(Source, _DB):
                 parts=paragraphs(report),
                 context=[Part("events", "code", _events_text(evs), "events it looked at")],
                 refs=[("argus.rule", rule)], question=self.QUESTION,
-                priority=2 + (t or 0) / 1e10, link=f"/rules/{rule}")
+                priority=2 + (t or 0) / 1e10, link=f"/rules/{rule}",
+                group=f"investigation|{rule}")
 
 
 class Alerts(Source, _DB):
     name = "argus.alert"
 
     def items(self):
-        self.db.executescript(BLOCKS_SCHEMA)
+        State(self.db)  # creates the tables, adds new columns
         rows = self.db.execute(
-            "SELECT id, rule, t, severity, summary, message, data FROM alerts "
+            "SELECT id, rule, t, severity, summary, message, data, event FROM alerts "
             "ORDER BY id DESC LIMIT 1000").fetchall()
-        for aid, rule, t, severity, summary, message, data in rows:
+        for aid, rule, t, severity, summary, message, data, event in rows:
+            data = _json(data, None)
+            event = _json(event, None)
             yield Item(
                 source=self.name, key=f"alert:{aid}",
                 title=f"{severity}: {summary}",
                 parts=[Part("summary", "text", summary or "", "alert"),
                        Part("severity", "field", severity or "", "severity")],
-                context=[Part("message", "code", message or "", "line that raised it"),
-                         Part("data", "code", data or "", "values from the rule"),
+                context=[Part("event", "fields", fields_text(event),
+                              "event that raised it, every field") if event else
+                         Part("message", "code", message or "", "line that raised it"),
+                         Part("data", "fields", fields_text(data),
+                              "captured by the rule's regex") if isinstance(data, dict)
+                         else Part("data", "code", json.dumps(data), "values from the rule"),
                          Part("when", "field", _when(t), "when")],
                 refs=[("argus.rule", rule)],
                 question="Was this alert worth your attention? If not, mark what in "
                          "the rule below made it fire.",
                 priority=SEVERITY_PRIORITY.get(severity, 0) + (t or 0) / 1e10,
-                link=f"/rules/{rule}")
+                link=f"/rules/{rule}", group=f"alert|{rule}")
 
 
 class Rules(Source, _DB):
@@ -133,9 +174,13 @@ class Rules(Source, _DB):
 
     def items(self):
         rs = self.ruleset or RuleSet()
-        self.db.executescript(BLOCKS_SCHEMA)
+        State(self.db)  # creates the tables, adds new columns
         stats = {r: (h, last) for r, h, last in
                  self.db.execute("SELECT rule, hits, last_hit FROM rule_stats")}
+        examples = {}
+        for rule, event in self.db.execute("SELECT rule, event FROM rule_events ORDER BY id"):
+            examples.setdefault(rule, []).append(_json(event, {}))
+        compiled = {c.rule["name"]: c for cs in rs.compiled.values() for c in cs}
         for src, rules in rs.by_source.items():
             for r in rules:
                 hits, last = stats.get(r["name"], (0, None))
@@ -147,9 +192,19 @@ class Rules(Source, _DB):
                 parts.append(Part("actions", "code", "\n".join(
                     _toml_value(a) for a in r.get("actions", [])), "actions"))
                 context = [Part("samples", "code", "\n".join(r.get("samples", [])),
-                                "lines it was written for"),
-                           Part("stats", "field", f"{src} · {hits} hits, last {_when(last)}"
-                                f" · created {r.get('created', '?')}", "stats")]
+                                "lines it was written for")]
+                c = compiled.get(r["name"])
+                for i, e in enumerate(examples.get(r["name"], [])[:3], 1):
+                    groups = c.test(e) if c else None
+                    if groups:
+                        context.append(Part(f"captured{i}", "fields", fields_text(groups),
+                                            f"example {i}: what the regex captured"))
+                    context.append(Part(f"event{i}", "fields", fields_text(e),
+                                        f"example {i}: the whole event"))
+                if r.get("rejected"):
+                    context.insert(0, Part("rejected", "code", "\n".join(
+                        f"{k} = {_toml_value(v)}" for k, v in r["rejected"].items()),
+                        "the model's last rejected attempt"))
                 if r.get("flagged"):
                     context.insert(0, Part("review", "text", r.get("review", ""),
                                            "flagged for review because"))
@@ -159,7 +214,11 @@ class Rules(Source, _DB):
                     question="Is this a good rule: does it match the right lines, and "
                              "does it do the right thing with them?",
                     priority=(2 if r.get("flagged") else 0) + min(hits or 0, 1e6) / 1e6,
-                    link=f"/rules/{r['name']}")
+                    link=f"/rules/{r['name']}",
+                    # Fallbacks from one source are near-duplicates of each other.
+                    group=f"fallback|{src}" if r["name"].startswith("unlearned_") else "",
+                    live=[Part("stats", "field", f"{src} · {hits} hits, last {_when(last)}"
+                               f" · created {r.get('created', '?')}", "stats")])
 
 
 def sources(db, ruleset=None):

@@ -130,11 +130,44 @@ class TestCheck(unittest.TestCase):
         same = [ev(f"thing {i} happened") for i in range(50)]
         self.assertEqual(rules.check(self.rule(regex=r"thing (?P<n>\d+) happened"),
                                      "demo.service", self.rs, same[:1], same), [])
-        # Many different shapes: too broad.
+        # Many different shapes are fine on their own (routine chatter)...
         mixed = [ev(f"{i} {'x' * i} happened {'y' * (30 - i)}") for i in range(1, 30)]
-        p = rules.check(self.rule(regex=r"^(?P<n>\d+) .* happened"), "demo.service",
-                        self.rs, mixed[:1], mixed)
-        self.assertTrue(any("too broad" in x for x in p), p)
+        noise = [ev(f"other line {'z' * i}") for i in range(30)]
+        self.assertEqual(rules.check(self.rule(regex=r"^(?P<n>\d+) .* happened"),
+                                     "demo.service", self.rs, mixed[:1], mixed + noise), [])
+        # ...but matching nearly every line from the source is too broad.
+        p = rules.check(self.rule(regex=r"(?P<x>.*)(?:happened|other line)"), "demo.service",
+                        self.rs, mixed[:1], mixed + noise)
+        self.assertTrue(any("nearly all" in x for x in p), p)
+
+    def test_too_broad_swallows_errors(self):
+        info = [ev(f"peer status: {i} connected", PRIORITY="6") for i in range(5)]
+        err = [ev("peer status: table corrupted", PRIORITY="3")]
+        filler = [ev(f"unrelated {'q' * i}", PRIORITY="6") for i in range(60)]
+        p = rules.check(self.rule(regex=r"peer status: (?P<what>.+)"), "demo.service",
+                        self.rs, info, info + err + filler)
+        self.assertTrue(any("more severe" in x for x in p), p)
+        ok = rules.check(self.rule(regex=r"peer status: (?P<n>\d+) connected"), "demo.service",
+                         self.rs, info, info + err + filler)
+        self.assertEqual(ok, [])
+
+    def test_template_fallback(self):
+        lines = [ev(f"derp-{i} connected to 10.0.0.{i}:41641 after {i}.5s")
+                 for i in range(1, 6)]
+        rule = rules.fallback(lines, "unlearned_demo_1", "why",
+                              rejected={"regex": "derp", "actions": [{"block": "ignore"}]})
+        c = rules.Compiled(rule)
+        self.assertTrue(all(c.test(e) is not None for e in lines))
+        self.assertEqual(c.test(lines[2]), {"n1": "3", "ip1": "10.0.0.3:41641", "n2": "3.5"})
+        self.assertIsNone(c.test(ev("derp-1 disconnected from 10.0.0.1:41641 after 1.5s")))
+        self.assertEqual([a["block"] for a in rule["actions"]], ["count", "collect"])
+        self.assertTrue(rule["flagged"])
+        self.assertEqual(rule["rejected"]["regex"], "derp")
+        # survives a round trip through TOML
+        import tomllib
+        back = tomllib.loads(rules.dump_rules("demo.service", [rule]))["rule"][0]
+        self.assertEqual(back["regex"], rule["regex"])
+        self.assertEqual(back["rejected"], rule["rejected"])
 
     def test_name_conflict_and_overlap(self):
         older = rules.make({"name": "disk_slow", "regex": r"disk (?P<d>\w+) slow",

@@ -9,6 +9,8 @@ Pages:
     {prefix}/next           redirect to the next unlabeled item
     {prefix}/i/<id>         the review screen for one item version
     {prefix}/api/label      POST a label as JSON
+    {prefix}/api/group_duplicates  POST {item_id, ids?}: skip its group (or just
+                                   ids) as duplicates of it
     {prefix}/export.jsonl   every label with its item snapshot
 """
 
@@ -22,10 +24,12 @@ STATIC = Path(__file__).parent / "static"
 
 BASE_CSS = """
 :root { --bg:#fff; --fg:#1b1b1b; --muted:#6b6b6b; --line:#e3e3e3; --panel:#f6f6f6;
-        --wrong:#d64545; --good:#2e8b57; --from:#b9770e; --missing:#6a5acd; }
+        --wrong:#d64545; --good:#2e8b57; --from:#b9770e; --missing:#6a5acd;
+        --unsupported:#c2185b; --unclear:#5f6b7a; --should:#0277bd; --nbo:#8d6e63; }
 @media (prefers-color-scheme: dark) {
   :root { --bg:#161616; --fg:#e8e8e8; --muted:#9a9a9a; --line:#333; --panel:#1f1f1f;
-          --wrong:#ff7b6b; --good:#7fd19b; --from:#f2b84b; --missing:#a99cff; } }
+          --wrong:#ff7b6b; --good:#7fd19b; --from:#f2b84b; --missing:#a99cff;
+          --unsupported:#f48fb1; --unclear:#a7b1bd; --should:#6cc3f2; --nbo:#c9a99b; } }
 body { background:var(--bg); color:var(--fg); margin:0 auto; max-width:1300px;
        padding:16px; font:14px/1.45 system-ui, sans-serif; }
 a { color:inherit; }
@@ -85,6 +89,11 @@ class App:
                     return 200, ctype + "; charset=utf-8", f.read_bytes()
             if method == "POST" and rest == "/api/label":
                 return self.post_label(json.loads(body or b"{}"))
+            if method == "POST" and rest == "/api/group_duplicates":
+                d = json.loads(body or b"{}")
+                n = self.store.mark_group_duplicates(int(d["item_id"]), self.by,
+                                                     d.get("ids"))
+                return 200, "application/json", json.dumps({"ok": True, "n": n}).encode()
             if method == "GET" and rest == "/export.jsonl":
                 lines = "".join(json.dumps(x, ensure_ascii=False) + "\n"
                                 for x in self.store.export())
@@ -124,16 +133,31 @@ class App:
         body = [f"<h2>Labeling</h2><p>{' · '.join(tabs)}</p>"]
         if q.get("done"):
             body.append("<p>Nothing left to label here. 🎉</p>")
+        todo = sum(r["state"] == "todo" for r in rows)
+        later = sum(r["state"] == "later" for r in rows)
         body.append(f"<p><a href='{start}'><b>Start labeling &rarr;</b></a> "
-                    f"<span class=muted>({sum(r['verdict'] is None for r in rows)} waiting)"
-                    f"</span> · <a href='{p}?{'' if show_all else 'all&'}"
+                    f"<span class=muted>({todo} waiting"
+                    + (f", then {later} you skipped for later" if later else "")
+                    + f")</span> · <a href='{p}?{'' if show_all else 'all&'}"
                     f"{'source=' + urllib.parse.quote(source) if source else ''}'>"
                     f"{'hide' if show_all else 'show'} labeled</a> · "
                     f"<a href={p}/export.jsonl>export</a></p>")
+        # Near-duplicates (same group) collapse into their first item.
+        shown, extra = [], {}
+        for r in rows:
+            g = (r["source"], r["group"], r["state"]) if r["group"] else None
+            if g and g in extra:
+                extra[g] += 1
+                continue
+            if g:
+                extra[g] = 0
+            shown.append((r, g))
         trs = "".join(
-            f"<tr><td><a href={p}/i/{r['id']}>{esc(r['title'])}</a></td>"
-            f"<td class=muted>{esc(r['source'])}</td>"
-            f"<td>{esc(r['verdict'] or '')}</td></tr>" for r in rows)
+            f"<tr><td><a href={p}/i/{r['id']}>{esc(r['title'])}</a>"
+            + (f" <span class=muted>+{extra[g]} like this</span>" if g and extra[g] else "")
+            + f"</td><td class=muted>{esc(r['source'])}</td>"
+            f"<td>{'skipped for later' if r['state'] == 'later' else esc(r['verdict'] or '')}"
+            f"</td></tr>" for r, g in shown)
         body.append("<table><tr><th>item</th><th>source</th><th>your verdict</th></tr>"
                     + (trs or "<tr><td colspan=3 class=muted>Nothing here.</td></tr>")
                     + "</table>")
@@ -166,6 +190,13 @@ class App:
             "next": f"{self.prefix}/next?after={item_id}" + (
                 f"&source={urllib.parse.quote(source)}" if source else ""),
             "prefix": self.prefix,
+            "group": [self.preview(r) for r in self.store.group_of(item_id, self.by)[:50]],
+            "state": next((r["state"] for r in self.store.queue(
+                self.by, item["source"], include_labeled=True, limit=None)
+                if r["id"] == item_id), None),
+            "todo_left": any(r["state"] == "todo" for r in self.store.queue(self.by)),
+            "recent": self.store.recent(self.by, exclude=item_id),
+            "group_api": f"{self.prefix}/api/group_duplicates",
         }
         blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
         head = f"<link rel=stylesheet href={self.prefix}/static/label.css>"
@@ -174,6 +205,14 @@ class App:
         return 200, "text/html; charset=utf-8", shell(f"label: {item['title']}", body,
                                                       self.nav, head)
 
+    def preview(self, row):
+        """A group member, with enough of its text to tell it apart."""
+        it = self.store.item(row["id"]) or {}
+        bits = [p["text"] for p in (it.get("parts") or [])[:1] + (it.get("context") or [])[:2]]
+        text = " · ".join(" ".join(b.split())[:200] for b in bits if b)
+        return {"id": row["id"], "title": row["title"], "state": row["state"],
+                "preview": text}
+
     def post_label(self, d):
         item_id = int(d["item_id"])
         item = self.store.item(item_id)
@@ -181,7 +220,8 @@ class App:
             raise ValueError("no such item")
         lid = self.store.save_label(
             item_id, self.by, d.get("verdict"), d.get("marks") or [],
-            fixable=d.get("fixable"), confidence=d.get("confidence"), note=d.get("note"))
+            fixable=d.get("fixable"), confidence=d.get("confidence"), note=d.get("note"),
+            links=d.get("links") or [])
         src = self.sources.get(item["source"])
         if src:
             src.labeled(item, self.store.latest_label(item_id, self.by))

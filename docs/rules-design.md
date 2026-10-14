@@ -53,6 +53,25 @@ things later.
 - **Rules must not be too broad.** A rule that matches all or nearly all
   lines (from its source, or overall) is rejected or flagged. Measure this by
   replaying it against a recent journal window.
+  Since 2026-10-14 the check counts the lines it matches beyond the shapes
+  of its examples, and rejects it only when (a) it matches 95% or more of a
+  recent window of 50+ lines and some of those are of other shapes, or (b)
+  it matches other-shaped lines more severe than any of its examples, at
+  warning or worse. Matching many shapes on its own is fine: the earlier
+  "more than 20 shapes" limit rejected good rules.
+- **Fallbacks are templates, and they count and keep lines.** When the
+  model's rules are all rejected, argus writes `unlearned_<source>_N` with a
+  regex built from the group's template (numbers, IPs, hex and UUIDs become
+  named groups), so one fallback covers the whole group instead of one exact
+  line. Its actions are a daily count and `collect` (20 lines), so the
+  matching lines can be read. The model's last rejected attempt is kept in
+  the rule as `rejected`, and the review note says plainly that these are
+  that attempt's problems, not the fallback's.
+- **Each rule keeps its first 5 whole events** (every journal field) in the
+  `rule_events` table, and an alert keeps the whole event that raised it, so
+  the labeling page can show all fields and what the regex captured.
+  `python -m argus rules examples --since -7d` fills them in for rules from a
+  journal window; it only reads otherwise (no actions, counts or cursor).
 - **Rules are scoped to a source** in general. Exactly what counts as a
   source is still open (see 3).
 - **No approval needed for new rules**, but the page lists *all* rules, not

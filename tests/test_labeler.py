@@ -129,6 +129,105 @@ class CoreTest(unittest.TestCase):
         self.assertFalse(default_reason("wrong", "unsure"))
 
 
+class NewKindsLinksGroupsTest(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.src = ListSource("demo", [item("a", group="g1"), item("b", group="g1"),
+                                       item("c", group="g1"), item("d")])
+        self.store.sync([self.src])
+        self.id = {k: self.store.current_id("demo", k) for k in "abcd"}
+
+    def test_new_kinds_and_fix(self):
+        a = self.id["a"]
+        self.store.save_label(a, "andy", "bad", [
+            {"part": "p1", "start": 0, "end": 5, "kind": "should_be", "fix": "ignore"},
+            {"part": "p1", "kind": "unsupported"},
+            {"part": "p2", "kind": "unclear"},
+            {"part": "p2", "kind": "no_better_option"},
+            {"part": "p2", "kind": "wrong", "fix": "dropped: only should_be keeps it"},
+        ])
+        marks = self.store.latest_label(a, "andy")["marks"]
+        self.assertEqual(marks[0]["fix"], "ignore")
+        self.assertNotIn("fix", marks[4])
+        self.assertEqual([m["reason"] for m in marks], [True, True, True, False, True])
+
+    def test_links(self):
+        a, b = self.id["a"], self.id["b"]
+        self.store.save_label(a, "andy", "bad")
+        self.store.save_label(b, "andy", "skip", links=[{"kind": "duplicate", "target": a}])
+        (link,) = self.store.latest_label(b, "andy")["links"]
+        self.assertEqual((link["kind"], link["target"], link["title"]), ("duplicate", a, "item a"))
+        self.assertEqual(self.store.recent("andy", exclude=b)[0]["id"], a)
+        for bad in ([{"kind": "same", "target": a}], [{"kind": "related", "target": 999}],
+                    [{"kind": "related", "target": b}]):
+            with self.assertRaises(ValueError):
+                self.store.save_label(b, "andy", "skip", links=bad)
+
+    def test_groups(self):
+        a = self.id["a"]
+        self.assertEqual({r["id"] for r in self.store.group_of(a, "andy")},
+                         {self.id["b"], self.id["c"]})
+        self.assertEqual(self.store.group_of(self.id["d"], "andy"), [])
+        self.store.save_label(a, "andy", "bad")
+        self.assertEqual(self.store.mark_group_duplicates(a, "andy"), 2)
+        lab = self.store.latest_label(self.id["c"], "andy")
+        self.assertEqual((lab["verdict"], lab["links"][0]["target"]), ("skip", a))
+        self.assertEqual(self.store.group_of(a, "andy"), [])
+
+    def test_group_duplicates_only_ticked(self):
+        a = self.id["a"]
+        self.assertEqual(self.store.mark_group_duplicates(a, "andy", ids=[self.id["b"]]), 1)
+        self.assertEqual([r["id"] for r in self.store.group_of(a, "andy")], [self.id["c"]])
+
+    def test_skip_comes_back_last(self):
+        a, b, c, d = (self.id[k] for k in "abcd")
+        self.store.save_label(a, "andy", "skip")
+        self.store.save_label(b, "andy", "skip")
+        self.store.save_label(c, "andy", "skip", links=[{"kind": "duplicate", "target": a}])
+        q = self.store.queue("andy")
+        self.assertEqual([(r["id"], r["state"]) for r in q],
+                         [(d, "todo"), (a, "later"), (b, "later")])  # oldest skip first
+        self.assertEqual(self.store.counts("andy")["demo"], (4, 1))  # only the duplicate is done
+        self.store.save_label(a, "andy", "good")
+        self.assertEqual([r["id"] for r in self.store.queue("andy")], [d, b])
+
+    def test_new_field_kinds(self):
+        self.store.save_label(self.id["a"], "andy", "bad", marks=[
+            {"kind": "should_use", "part": "p1", "start": 0, "end": 3},
+            {"kind": "should_not_use", "part": "p1", "start": 4, "end": 5}])
+        marks = self.store.latest_label(self.id["a"], "andy")["marks"]
+        self.assertEqual([m["reason"] for m in marks], [True, True])
+
+    def test_live_parts_dont_make_a_new_version(self):
+        self.src.list = [item("a", group="g", live=[Part("stats", "field", "3 hits")])]
+        self.assertEqual(self.store.sync([self.src]), 0)
+        self.src.list = [item("a", group="g", live=[Part("stats", "field", "9 hits")])]
+        self.assertEqual(self.store.sync([self.src]), 0)
+        self.assertEqual(self.store.item(self.id["a"])["live"][0]["text"], "9 hits")
+
+
+        # Changing an item's group must not make a new version.
+        self.src.list = [item("a", group="other")]
+        self.assertEqual(self.store.sync([self.src]), 0)
+
+    def test_migrates_old_db(self):
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        old = sqlite3.connect(path)
+        old.executescript("""
+            CREATE TABLE items (id INTEGER PRIMARY KEY, source TEXT, key TEXT, version TEXT,
+                snapshot TEXT, first_seen REAL, last_seen REAL, priority REAL DEFAULT 0,
+                current INTEGER DEFAULT 1, UNIQUE (source, key, version));
+            CREATE TABLE marks (id INTEGER PRIMARY KEY, label_id INTEGER, item_id INTEGER,
+                part TEXT, start INTEGER, end INTEGER, kind TEXT, reason INTEGER, note TEXT);
+            INSERT INTO marks (label_id, kind, reason) VALUES (1, 'wrong', 1);""")
+        old.commit()
+        old.close()
+        st = Store(path)
+        st.sync([ListSource("demo", [item("a", group="g")])])
+        self.assertEqual(st.db.execute("SELECT grp FROM items").fetchone()[0], "g")
+        self.assertIsNone(st.db.execute("SELECT fix FROM marks").fetchone()[0])
+
+
 class WebTest(unittest.TestCase):
     def setUp(self):
         self.src = ListSource("demo", [item("a", refs=[("other", "x")]),
@@ -167,6 +266,17 @@ class WebTest(unittest.TestCase):
         self.assertEqual(lab["marks"][0]["item_id"], ref_id)     # a mark into the ref
         status, _, loc = self.get("/label/next", f"source=demo&after={iid}")
         self.assertNotIn(f"/i/{iid}".encode(), loc)
+
+    def test_queue_collapses_groups_and_group_api(self):
+        app = App(Store(":memory:"), [ListSource("demo", [item(k, group="g") for k in "abc"]
+                                                 + [item("solo")])])
+        body = app.handle("GET", "/label", "")[2].decode()
+        self.assertIn("+2 like this", body)
+        self.assertEqual(body.count("/label/i/"), 2)
+        a = app.store.current_id("demo", "a")
+        status, _, out = app.handle("POST", "/label/api/group_duplicates", "",
+                                    json.dumps({"item_id": a}).encode())
+        self.assertEqual((status, json.loads(out)["n"]), (200, 2))
 
     def test_bad_post(self):
         self.get("/label")
@@ -222,6 +332,30 @@ class ArgusSourcesTest(unittest.TestCase):
         (rule,) = label_sources.Rules(self.db, self.rs).items()
         self.assertEqual([p.id for p in rule.parts], ["regex", "actions"])
         self.assertEqual(rule.context[0].id, "review")           # flagged: reason shown first
+
+    def test_whole_events_and_captures(self):
+        from argus.blocks import State
+        st = State(self.db)
+        ev = {"MESSAGE": "boom 7", "PRIORITY": "3", "_SYSTEMD_UNIT": "x.service",
+              "__CURSOR": "c1", "CODE_LINE": "12"}
+        for _ in range(7):
+            st.keep_example("demo_rule", ev, 1)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM rule_events").fetchone()[0], 5)
+        self.rs.by_source["kernel"][0]["regex"] = r"boom (?P<n>\d+)"
+        self.rs._compile("kernel")
+        (rule,) = label_sources.Rules(self.db, self.rs).items()
+        ctx = {p.id: p for p in rule.context}
+        self.assertEqual(ctx["captured1"].text, "n=7")
+        self.assertEqual(ctx["event1"].kind, "fields")
+        self.assertEqual(ctx["event1"].text.splitlines(),
+                         ["MESSAGE=boom 7", "CODE_LINE=12", "PRIORITY=3",
+                          "_SYSTEMD_UNIT=x.service", "__CURSOR=c1"])
+        self.assertNotIn("event4", ctx)                          # three shown
+        self.assertEqual(rule.live[0].id, "stats")
+        st.alert("demo_rule", "watch", "boom", {"event": ev, "t": 5, "groups": {"n": "7"}})
+        alert = next(iter(label_sources.Alerts(self.db).items()))
+        self.assertEqual([p.id for p in alert.context][:2], ["event", "data"])
+        self.assertEqual(alert.context[1].text, "n=7")
 
     def test_sync_through_store(self):
         store = Store(":memory:")
