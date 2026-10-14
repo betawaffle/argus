@@ -50,6 +50,12 @@ How to choose actions:
 - routine, expected chatter: ignore, or count if the volume might matter
 - errors and warnings: count, plus threshold to flag when it gets frequent;
   flag directly (attention) only for things a human must fix soon
+- a threshold's n must be well above the normal volume shown for the group:
+  lines that are routine at that rate (renewals, keepalives, reconnects)
+  should not alert at all. In summaries say "reached {{n}}", since the alert
+  fires once when the count reaches n
+- one rule per kind of line: requests to different URLs, or the steps of one
+  request, belong in one rule with a named group for what varies
 - changing state (link up/down, pool health, versions): track with on_change
 - new users, devices, addresses: distinct with on_new
 - something you can't judge from the lines alone: investigate
@@ -94,7 +100,7 @@ class Learner:
         self.ruleset = ruleset
         self.llm = llm
 
-    def learn(self, src, examples, recent=()):
+    def learn(self, src, examples, recent=(), others=()):
         """Make a rule for examples (events from src). Returns (rule, accepted,
         transcript path). Always returns a rule: a fallback if all else fails."""
         outcome = {"rule": None, "problems": [], "proposals": 0}
@@ -165,7 +171,7 @@ class Learner:
                    "run": tools.run})
         agent = Agent(SYSTEM, llm=self.llm, tools=toolset, max_steps=14)
         try:
-            agent.run(self._task(src, examples), on_event=None)
+            agent.run(self._task(src, examples, others), on_event=None)
         except Exception as e:  # model or server trouble: fall back, keep going
             outcome["problems"].append(f"error while learning: {e}")
         if outcome["rule"]:
@@ -176,10 +182,10 @@ class Learner:
         self.ruleset.add(src, rule, "fallback")
         return rule, False, agent.transcript
 
-    def _task(self, src, examples):
+    def _task(self, src, examples, others=()):
         existing = self.ruleset.by_source.get(src, [])
-        lines = [f"Source: {src}", f"Unmatched lines in this group: {len(examples)}",
-                 "", "Example events (volatile fields removed):"]
+        lines = [f"Source: {src}", f"Unmatched lines in this group: {len(examples)}"
+                 + _rate(examples), "", "Example events (volatile fields removed):"]
         seen = set()
         for e in examples:
             if e["MESSAGE"] in seen:
@@ -188,6 +194,11 @@ class Learner:
             lines.append(json.dumps(summarize(e)))
             if len(seen) >= 6:
                 break
+        if others:
+            lines += ["", "Other unmatched shapes from this source (count, shape). If "
+                      "some are the same kind of line as this group, write one rule "
+                      "that covers them all:"]
+            lines += [f"{n:>5}  {shape[:200]}" for shape, n in list(others)[:15]]
         if existing:
             lines += ["", f"Existing rules for {src} (older first; first match wins):"]
             for r in existing[-30:]:
@@ -201,6 +212,17 @@ class Learner:
         while self.ruleset.get(f"unlearned_{base}_{n}")[1]:
             n += 1
         return f"unlearned_{base}_{n}"
+
+
+def _rate(examples):
+    """How often these lines arrive, so thresholds can sit above normal."""
+    from .blocks import event_time
+    ts = [event_time(e) for e in examples]
+    span = (max(ts) - min(ts)) / 3600 if ts else 0
+    if len(ts) < 2 or span <= 0:
+        return ""
+    return (f" over {span:.1f} hours, about {len(ts) / span * 24:.0f} a day at this "
+            "rate (normal volume: set thresholds well above it)")
 
 
 def _without(ruleset, name):

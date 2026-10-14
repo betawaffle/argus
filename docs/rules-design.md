@@ -292,3 +292,21 @@ wrong, and the fix:
 
 `python -m argus rules reset` sets the rules repo aside (renamed with a
 timestamp) and clears the engine's tables, for starting over.
+
+## Trial run 2 (2026-10-14)
+
+Same 6-hour window size, after the fixes above: 6,908 lines, 235 groups, 40
+rules (all accepted), 10.5 minutes, **3 alerts** (trial 1: 37). Tracebacks
+joined cleanly (28 incidents, 23 lines each; loguru's `> File` line needed
+adding). What was still wrong, and the fix:
+
+- **Thresholds below normal volume.** DHCP renewals (72 in 6 h) and DERP idle
+  closures (50 in 6 h) got thresholds of 10 a day. The model now sees the
+  group's rate ("about N a day") and is told to set n well above it, and that
+  routine lines at that rate shouldn't alert.
+- **`{n}` reads like the real count.** The alert fires once when the count
+  reaches n, so summaries should say "reached {n}"; the prompt says so.
+- **One rule per URL / per step.** Open WebUI got 12 rules for 12 GET
+  endpoints, llm-server 11 for one request's steps. The model now sees the
+  other unmatched shapes from the same source and is asked to cover the same
+  kind of line with one rule.

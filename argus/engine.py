@@ -140,7 +140,10 @@ class Engine:
             (src, shape), evs = max(todo.items(), key=lambda kv: len(kv[1]))
             tried.add((src, shape))
             self.log(f"learning [{src}] {len(evs)}x {shape[:100]!r}")
-            rule, ok, transcript = self.learner.learn(src, evs, source_lines.get(src, []))
+            others = sorted(((k[1], len(v)) for k, v in groups.items()
+                             if k[0] == src and k != (src, shape)), key=lambda x: -x[1])
+            rule, ok, transcript = self.learner.learn(src, evs, source_lines.get(src, []),
+                                                      others=others)
             learned += 1
             self.new_rules.add(rule["name"])
             self.db.execute(
