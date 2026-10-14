@@ -5,9 +5,13 @@ finding and shown to the model the next time the same service comes up.
 """
 
 import urllib.parse
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from . import rules_page
+from labeler import Store as LabelStore
+from labeler.web import App as LabelApp
+
+from . import label_sources, rules_page
 from .patterns import Store
 from .serve_util import esc, page, when
 
@@ -24,6 +28,23 @@ def feedback_form(fid, current):
 
 class Handler(BaseHTTPRequestHandler):
     store = None
+    labels = None   # the labeling tool, mounted at /label
+
+    def label(self, method, body=b""):
+        url = urllib.parse.urlparse(self.path)
+        resp = self.labels and self.labels.handle(method, url.path, url.query, body)
+        if not resp:
+            return False
+        status, ctype, payload = resp
+        self.send_response(status)
+        if ctype == "redirect":
+            self.send_header("Location", payload.decode())
+            payload = b""
+        else:
+            self.send_header("Content-Type", ctype)
+        self.end_headers()
+        self.wfile.write(payload)
+        return True
 
     def send(self, body, status=200):
         self.send_response(status)
@@ -32,6 +53,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.label("GET"):
+            return
         url = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(url.query)
         if url.path == "/":
@@ -47,7 +70,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
-        form = urllib.parse.parse_qs(self.rfile.read(n).decode())
+        raw = self.rfile.read(n)
+        if self.label("POST", raw):
+            return
+        form = urllib.parse.parse_qs(raw.decode())
         if self.path == "/ack":
             rules_page.ack(self.store.db, int(form["id"][0]))
             self.send_response(303)
@@ -79,7 +105,7 @@ class Handler(BaseHTTPRequestHandler):
         counts = dict(self.store.db.execute(
             "SELECT verdict, count(*) FROM findings GROUP BY verdict").fetchall())
         nav = ("<nav><a href=/>open findings</a><a href=/?all>everything</a>"
-               "<a href=/rules>rules</a>"
+               "<a href=/rules>rules</a><a href=/label>label</a>"
                "<span class=muted>" + ", ".join(f"{v}: {c}" for v, c in sorted(counts.items()))
                + "</span></nav>")
         body = "".join(
@@ -126,6 +152,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(db_path, bind="0.0.0.0", port=8082):
     Handler.store = Store(db_path)
+    Handler.labels = LabelApp(LabelStore(Path(db_path).with_name("label.db")),
+                              label_sources.sources(Handler.store.db),
+                              nav=rules_page.NAV)
     print(f"argus page on http://{bind}:{port}/")
     # Single-threaded on purpose: one reader, tiny requests, one SQLite handle.
     HTTPServer((bind, port), Handler).serve_forever()

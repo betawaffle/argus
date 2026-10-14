@@ -1,0 +1,71 @@
+/* Review screen. Colors come from the tokens in web.py's BASE_CSS. */
+.layout { display:grid; grid-template-columns:minmax(0, 1fr) 340px; gap:20px;
+          align-items:start; }
+@media (max-width: 800px) { .layout { grid-template-columns:1fr; } }
+.panel { position:sticky; top:12px; background:var(--panel); border:1px solid var(--line);
+         border-radius:6px; padding:12px; }
+@media (max-width: 800px) { .panel { position:static; } }
+h2 { margin:4px 0 2px; font-size:18px; }
+.question { font-size:15px; margin:2px 0 12px; }
+.banner { border:1px solid var(--line); border-radius:6px; padding:6px 10px; margin:8px 0; }
+.group-title { margin:18px 0 6px; font-size:12px; text-transform:uppercase;
+               letter-spacing:.05em; color:var(--muted); }
+.part { border-left:3px solid var(--line); padding:2px 0 2px 10px; margin:6px 0; }
+.part.cursor { border-left-color:var(--fg); }
+.part .head { font-size:12px; color:var(--muted); display:flex; gap:6px;
+              align-items:center; min-height:16px; }
+.part .body { margin:2px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.part.code .body, .part.field .body { font:12px/1.5 ui-monospace, monospace; }
+.part.after { opacity:.55; }
+.part.whole-wrong { border-left-color:var(--wrong); }
+.part.whole-good { border-left-color:var(--good); }
+.part.whole-missing { border-left-color:var(--missing); }
+.part.whole-from_here { border-left-color:var(--from); }
+.badge { border-radius:3px; padding:0 4px; font-size:11px; color:var(--bg);
+         cursor:pointer; }
+.k-wrong { --k:var(--wrong); } .k-good { --k:var(--good); }
+.k-from_here { --k:var(--from); } .k-missing { --k:var(--missing); }
+.badge { background:var(--k); }
+.m { background:color-mix(in srgb, var(--k) 22%, transparent);
+     border-bottom:2px solid var(--k); cursor:pointer; }
+.m.sel, .badge.sel, .pt.sel::before { outline:2px solid var(--fg); outline-offset:1px; }
+.m.noreason { border-bottom-style:dashed; }
+.after-text { opacity:.55; }
+.pt::before { content:"⁁"; color:var(--k); font-weight:700; cursor:pointer;
+              margin:0 1px; }
+.pt.k-from_here::before { content:"▸"; }
+/* panel */
+.row { margin:8px 0; }
+.row .lbl { font-size:12px; color:var(--muted); display:block; margin-bottom:3px; }
+.seg button { font:inherit; padding:3px 9px; border:1px solid var(--line);
+              background:var(--bg); color:var(--fg); border-radius:4px; cursor:pointer; }
+.seg button.on { background:var(--fg); color:var(--bg); }
+.seg button.v-good.on { background:var(--good); border-color:var(--good); }
+.seg button.v-bad.on { background:var(--wrong); border-color:var(--wrong); }
+textarea, input[type=text] { width:100%; box-sizing:border-box; font:inherit;
+                             background:var(--bg); color:var(--fg);
+                             border:1px solid var(--line); border-radius:4px; padding:4px; }
+.marks { list-style:none; padding:0; margin:0; }
+.marks li { border:1px solid var(--line); border-left:4px solid var(--k);
+            border-radius:4px; padding:5px 7px; margin:5px 0; background:var(--bg); }
+.marks li.sel { outline:2px solid var(--fg); }
+.marks .where { font-size:12px; color:var(--muted); overflow:hidden;
+                text-overflow:ellipsis; white-space:nowrap; }
+.marks .ctl { display:flex; gap:8px; align-items:center; font-size:12px; margin:3px 0; }
+.marks .del { margin-left:auto; cursor:pointer; color:var(--muted); background:none;
+              border:none; font:inherit; }
+.save { width:100%; padding:7px; font:inherit; font-weight:600; margin-top:6px;
+        cursor:pointer; border-radius:4px; border:1px solid var(--fg);
+        background:var(--fg); color:var(--bg); }
+.save:disabled { opacity:.4; cursor:default; }
+.keys { font-size:12px; color:var(--muted); }
+.keys kbd, .help kbd { font:11px ui-monospace, monospace; border:1px solid var(--line);
+                       border-radius:3px; padding:0 3px; }
+.help { position:fixed; inset:10% 20%; background:var(--panel); border:1px solid var(--line);
+        border-radius:8px; padding:16px 22px; overflow:auto; z-index:10;
+        box-shadow:0 8px 30px rgba(0,0,0,.25); }
+@media (max-width: 800px) { .help { inset:16px; } }
+.help table td { padding:2px 8px; border:none; }
+.toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
+         background:var(--fg); color:var(--bg); padding:6px 14px; border-radius:6px;
+         z-index:20; }

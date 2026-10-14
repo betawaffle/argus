@@ -17,6 +17,10 @@ Stdlib-only Python 3; nothing to install.
 - `argus/tools.py`: read-only tools. Commands run without a shell and must
   pass an allowlist. Other hosts are reached over ssh.
 - `argus/serve.py`: the findings page.
+- `labeler/`: a generic labeling tool, mounted at `/label` on the page, for
+  grading what the model writes (reports, alerts, rules). It doesn't import
+  argus; `argus/label_sources.py` adapts argus's data for it. See
+  [docs/labeling-design.md](docs/labeling-design.md).
 - `argus/patterns.py`: plain code collapses journal lines into patterns
   (numbers, IPs, UUIDs stripped) and keeps counts in SQLite, so only new or
   spiking patterns reach the model.
