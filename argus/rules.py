@@ -202,11 +202,14 @@ def literal_chars(regex):
     return len(re.sub(r"[.^$*+?()|]", "", s))
 
 
-def check(rule, src, ruleset, examples, recent=()):
+def check(rule, src, ruleset, examples, recent=(), hours=None):
     """Problems with a proposed rule (empty list if it's good).
 
     examples: the events it was written for; it must match all of them.
-    recent:   other recent events from the same source, for the broadness check.
+    recent:   this batch's events from the same source, for the broadness and
+              threshold checks.
+    hours:    how long the batch covers; thresholds are only checked when it
+              is long enough to say what a normal rate is.
     """
     p = []
     name = rule.get("name", "")
@@ -258,6 +261,8 @@ def check(rule, src, ruleset, examples, recent=()):
                      f"merge: propose_rule with name={older.name!r}, replace=true and "
                      f"a regex covering both. Older rule: {json.dumps(older.rule)}")
     p += identity_problems(rule, c, examples, recent)
+    if hours:
+        p += threshold_problems(rule, c, recent, hours)
     all_shapes = {template(e["MESSAGE"]) for e in recent}
     shapes = {template(e["MESSAGE"]) for e in recent if c.test(e) is not None}
     if len(shapes) > MAX_TEMPLATES and len(shapes) > TOO_BROAD * len(all_shapes):
@@ -268,6 +273,32 @@ def check(rule, src, ruleset, examples, recent=()):
         # want, so this isn't a rejection; a human takes a look.
         p.append(f"review: broad, covers {len(shapes)} differently shaped lines "
                  f"from this source, e.g. {sorted(shapes)[:3]}")
+    return p
+
+
+def threshold_problems(rule, c, recent, hours):
+    """A threshold that a normal day reaches alerts every day; one far above
+    normal never fires. Judged from what the regex matches in this batch."""
+    p = []
+    thresholds = [a for a in blocks.walk(rule.get("actions"))
+                  if a.get("block") == "threshold" and isinstance(a.get("n"), int)]
+    if not thresholds:
+        return p
+    hits = sum(1 for e in recent if c.test(e) is not None)
+    for a in thresholds:
+        window = a.get("window", "day")
+        normal = hits / hours * blocks.WINDOWS.get(window, 86400) / 3600
+        good = max(5, round(normal * 4))
+        if a["n"] < 2 * normal:
+            p.append(f"threshold n={a['n']} per {window} is too low: this rule "
+                     f"matched {hits} lines in {hours:.1f} hours, about "
+                     f"{normal:.0f} per {window} normally, so it would alert on a "
+                     f"normal {window}. Use about n={good}.")
+        elif a["n"] > 20 and a["n"] > 10 * max(normal, 1):
+            p.append(f"threshold n={a['n']} per {window} is too high: this rule "
+                     f"matched {hits} lines in {hours:.1f} hours, about "
+                     f"{normal:.0f} per {window}, so it would never fire. "
+                     f"Use about n={good}.")
     return p
 
 

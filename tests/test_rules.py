@@ -97,6 +97,23 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(rules.check(r, "demo.service", self.rs,
                                      [ev("Started x", MESSAGE_ID="39f5")]), [])
 
+    def test_threshold_against_rate(self):
+        # 60 matching lines in 6 hours: 240 a day is normal.
+        lines = [ev(f"disk sd{i % 3} slow") for i in range(60)]
+        def with_n(n):
+            return self.rule(regex=r"disk (?P<d>\w+) slow", actions=[
+                {"block": "threshold", "n": n, "then": {
+                    "block": "flag", "severity": "watch", "summary": "x"}}])
+        low = rules.check(with_n(300), "demo.service", self.rs, lines[:1], lines, 6)
+        self.assertTrue(any("too low" in x and "n=960" in x for x in low), low)
+        high = rules.check(with_n(50000), "demo.service", self.rs, lines[:1], lines, 6)
+        self.assertTrue(any("too high" in x for x in high), high)
+        self.assertEqual(rules.check(with_n(960), "demo.service", self.rs,
+                                     lines[:1], lines, 6), [])
+        # No idea of the rate (short batch): not checked.
+        self.assertEqual(rules.check(with_n(5), "demo.service", self.rs,
+                                     lines[:1], lines), [])
+
     def test_identity_field(self):
         r = self.rule(regex=r"^(?P<up>[\d.]+) srv slot (?P<slot>\d)", actions=[
             {"block": "distinct", "field": "up",

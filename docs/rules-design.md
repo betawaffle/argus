@@ -348,3 +348,18 @@ broad" check rejected exactly those rules (33-109 shapes against a limit of
   anything over 20 shapes is still flagged for review.
 - **Thresholds overshot** (6-17x normal). The task now names a number:
   "about n=X per day (4x normal)".
+
+## Trial run 5 (2026-10-14)
+
+23,768 lines, 150 groups, **22 rules, all accepted, nothing pending, 9
+minutes**. Follow-up 10-minute batches took under a second and learned
+nothing new. tailscaled went from 17 rules to 2.
+
+The one bad part was thresholds: from 75,000x normal to 1.05x. The rate the
+model was shown came from the 20 example lines over their own time span (a
+burst of seconds read as millions a day), and for a rule covering several
+groups it saw one group's rate. Fix: argus now checks thresholds itself. It
+counts what the proposed regex matches in the batch, over the hours the batch
+covers, and rejects n below 2x normal or above 10x (with a suggested n of 4x).
+The task shows the group's rate over the whole batch. Batches shorter than an
+hour aren't used for this.

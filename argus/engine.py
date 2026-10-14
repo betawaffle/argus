@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS runs (
     learned INTEGER, pending INTEGER, seconds REAL);
 """
 PENDING_PER_GROUP = 20   # events kept per pending group; enough to learn from
+SOURCE_LINES = 50000     # lines kept per source per batch for rule checks
 
 INVESTIGATE_SYSTEM = """You are argus, watching unattended Linux machines.
 "local" is a Fedora workstation used for ML experiments; "moneta" is a NixOS
@@ -108,7 +109,8 @@ class Engine:
         n = matched = mirrored = 0
         for e in self._pending():
             self._sort(e, groups)
-        source_lines = defaultdict(list)   # recent lines per source, for checks
+        source_lines = defaultdict(list)   # this batch's lines per source, for checks
+        t_first = t_last = None
         stream = events_iter if events_iter is not None else events.read(self.host, cursor)
         for e in events.join_multiline(events.mark_mirrored(stream)):
             n += 1
@@ -117,7 +119,9 @@ class Engine:
                 mirrored += 1
                 continue
             src = events.source(e)
-            if len(source_lines[src]) < 2000:
+            t = blocks.event_time(e)
+            t_first, t_last = t_first or t, t
+            if len(source_lines[src]) < SOURCE_LINES:
                 source_lines[src].append(e)
             if self.dispatch(e, src):
                 matched += 1
@@ -132,6 +136,10 @@ class Engine:
         self.log(f"{n} events, {matched} matched, {mirrored} container echoes "
                  f"skipped, {len(groups)} unmatched groups")
 
+        # Hours the batch covers: rules' rates (and so thresholds) are judged
+        # against it. Under an hour says too little about a normal day.
+        hours = (t_last - t_first) / 3600 if t_first else 0
+        self.learner.hours = hours if hours >= 1 else None
         learned, tried = 0, set()
         while learned < learn_limit:
             todo = {k: v for k, v in groups.items() if k not in tried}
