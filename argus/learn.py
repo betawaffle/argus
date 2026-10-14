@@ -50,7 +50,8 @@ How to choose actions:
 - routine, expected chatter: ignore, or count if the volume might matter
 - errors and warnings: count, plus threshold to flag when it gets frequent;
   flag directly (attention) only for things a human must fix soon
-- a threshold's n must be well above the normal volume shown for the group:
+- a threshold's n should be about 3-5 times the normal daily volume shown
+  for the group, so it fires on a real burst but not on a normal day:
   lines that are routine at that rate (renewals, keepalives, reconnects)
   should not alert at all. In summaries say "reached {{n}}", since the alert
   fires once when the count reaches n
@@ -133,22 +134,28 @@ class Learner:
             else:
                 problems = rules.check(rule, src, self.ruleset, examples, recent)
             unknown = [p for p in problems if "unknown block" in p]
-            real = [p for p in problems if p not in unknown]
+            review = [p for p in problems if p.startswith("review: ")]
+            real = [p for p in problems if p not in unknown and p not in review]
             if real:
                 outcome["problems"] = real
                 if outcome["proposals"] >= MAX_PROPOSALS:
                     return "problem: too many attempts; stop now."
                 return "problems:\n- " + "\n- ".join(real)
+            notes = []
             if unknown:  # valid apart from blocks we don't have yet
+                notes.append("proposes new building blocks: " + "; ".join(unknown))
+            notes += [p[len("review: "):] for p in review]
+            if notes:
                 rule["flagged"] = True
-                rule["review"] = "proposes new building blocks: " + "; ".join(unknown)
+                rule["review"] = "; ".join(notes)
             why = reason or "learned"
             if replace and existing is not None:
                 self.ruleset.replace(src, rule, why)
             else:
                 self.ruleset.add(src, rule, why)
             outcome["rule"] = rule
-            return "accepted" + (" (flagged for review: new building block)" if unknown else "")
+            return "accepted" + (f" (flagged for review: {rule['review'][:200]})"
+                                 if notes else "")
 
         def test_regex(regex):
             try:

@@ -310,3 +310,19 @@ adding). What was still wrong, and the fix:
   endpoints, llm-server 11 for one request's steps. The model now sees the
   other unmatched shapes from the same source and is asked to cover the same
   kind of line with one rule.
+
+## Trial run 3 (2026-10-14)
+
+8,774 lines, 241 groups, 40 rules but 10 of them fallbacks, 50 minutes, 0
+alerts. The prompt now asked for one rule per kind of line, but the "too
+broad" check rejected exactly those rules (33-109 shapes against a limit of
+20), so the model retried until it ran out of attempts. Fixes:
+
+- **Broad isn't rejected, it's flagged.** A rule covering more than 20 shapes
+  is accepted and flagged for review. It's only rejected when it covers more
+  than 80% of the source's shapes (a match-almost-everything rule).
+- **Merging is spelled out.** The overlap message now says how to merge into
+  the older rule (`name=<older>`, `replace=true`), since an early broad rule
+  otherwise blocks every later one.
+- **Thresholds**: 3-5x the normal daily volume, not "well above" (trial 3 set
+  one at 40x, so it would never fire).

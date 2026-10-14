@@ -33,7 +33,8 @@ RULES_DIR = Path(os.environ.get("ARGUS_RULES", Path.home() / "work/argus-rules")
 NAME = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 STRUCTURED = {"MESSAGE_ID", "CODE_FILE", "_AUDIT_TYPE_NAME", "PODMAN_EVENT"}
 MIN_LITERAL = 6        # literal characters a regex needs when nothing else narrows it
-MAX_TEMPLATES = 20     # distinct message shapes one rule may cover in a batch
+MAX_TEMPLATES = 20     # shapes a rule may cover before it's flagged for review
+TOO_BROAD = 0.8        # share of a source's shapes a rule may never cover
 MAX_SAMPLES = 5
 
 
@@ -242,13 +243,20 @@ def check(rule, src, ruleset, examples, recent=()):
                 if c.test_message(s) is not None]
         if hits:
             p.append(f"overlaps with older rule {older.name!r} (it also matches "
-                     f"{hits[0][:200]!r}); the older rule wins, so narrow this one "
-                     f"or merge them: {json.dumps(older.rule)}")
+                     f"{hits[0][:200]!r}); the older rule wins. Narrow this one, or "
+                     f"merge: propose_rule with name={older.name!r}, replace=true and "
+                     f"a regex covering both. Older rule: {json.dumps(older.rule)}")
     p += identity_problems(rule, c, examples, recent)
+    all_shapes = {template(e["MESSAGE"]) for e in recent}
     shapes = {template(e["MESSAGE"]) for e in recent if c.test(e) is not None}
-    if len(shapes) > MAX_TEMPLATES:
-        p.append(f"too broad: matches {len(shapes)} differently shaped lines from "
-                 f"this source, e.g. {sorted(shapes)[:3]}")
+    if len(shapes) > MAX_TEMPLATES and len(shapes) > TOO_BROAD * len(all_shapes):
+        p.append(f"too broad: matches {len(shapes)} of the {len(all_shapes)} "
+                 f"differently shaped lines from this source, e.g. {sorted(shapes)[:3]}")
+    elif len(shapes) > MAX_TEMPLATES:
+        # One rule for one kind of line (all GET requests, say) is what we
+        # want, so this isn't a rejection; a human takes a look.
+        p.append(f"review: broad, covers {len(shapes)} differently shaped lines "
+                 f"from this source, e.g. {sorted(shapes)[:3]}")
     return p
 
 

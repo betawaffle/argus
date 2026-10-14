@@ -130,11 +130,16 @@ class TestCheck(unittest.TestCase):
         same = [ev(f"thing {i} happened") for i in range(50)]
         self.assertEqual(rules.check(self.rule(regex=r"thing (?P<n>\d+) happened"),
                                      "demo.service", self.rs, same[:1], same), [])
-        # Many different shapes: too broad.
+        # Many shapes, nearly all of the source's: too broad.
         mixed = [ev(f"{i} {'x' * i} happened {'y' * (30 - i)}") for i in range(1, 30)]
         p = rules.check(self.rule(regex=r"^(?P<n>\d+) .* happened"), "demo.service",
                         self.rs, mixed[:1], mixed)
         self.assertTrue(any("too broad" in x for x in p), p)
+        # Many shapes, but a minority of the source's: accepted, for review.
+        other = [ev(f"other {'z' * i} line {'w' * (40 - i)}") for i in range(40)]
+        p = rules.check(self.rule(regex=r"^(?P<n>\d+) .* happened"), "demo.service",
+                        self.rs, mixed[:1], mixed + other)
+        self.assertEqual([x[:14] for x in p], ["review: broad,"])
 
     def test_name_conflict_and_overlap(self):
         older = rules.make({"name": "disk_slow", "regex": r"disk (?P<d>\w+) slow",
