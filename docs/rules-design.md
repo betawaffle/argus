@@ -332,3 +332,19 @@ broad" check rejected exactly those rules (33-109 shapes against a limit of
   fallback never matched again. `template()` now turns durations into
   `<DUR>`, even inside a word. Fallbacks now match the line's shape (its
   text, with the varying parts left open) rather than the exact line.
+
+## Trial run 4 (2026-10-14)
+
+17,340 lines (llm-server was busy), 287 groups, 28 rules and 12 fallbacks,
+43 minutes, 0 alerts. Open WebUI went from 12 rules to 5. Fixes:
+
+- **Fallbacks blocked real rules.** "Overlaps with older rule
+  unlearned_tailscaled_service_1" was the most common rejection: a fallback
+  from earlier in the same run, which the model can't merge into. Fallbacks
+  are now marked `fallback = true`, don't count in the overlap check, and a
+  real rule that covers a fallback's sample replaces it.
+- **Too broad at 80% was too strict.** Open WebUI is almost all GET requests,
+  so one GET rule covered 32 of its 36 shapes. Now only above 95% is rejected;
+  anything over 20 shapes is still flagged for review.
+- **Thresholds overshot** (6-17x normal). The task now names a number:
+  "about n=X per day (4x normal)".

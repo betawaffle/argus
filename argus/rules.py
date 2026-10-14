@@ -34,7 +34,7 @@ NAME = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 STRUCTURED = {"MESSAGE_ID", "CODE_FILE", "_AUDIT_TYPE_NAME", "PODMAN_EVENT"}
 MIN_LITERAL = 6        # literal characters a regex needs when nothing else narrows it
 MAX_TEMPLATES = 20     # shapes a rule may cover before it's flagged for review
-TOO_BROAD = 0.8        # share of a source's shapes a rule may never cover
+TOO_BROAD = 0.95       # share of a source's shapes a rule may never cover
 MAX_SAMPLES = 5
 
 
@@ -157,9 +157,20 @@ class RuleSet:
         return None, None
 
     def add(self, src, rule, why):
-        self.by_source.setdefault(src, []).append(rule)
+        rules = self.by_source.setdefault(src, [])
+        rules.append(rule)
+        # A real rule replaces the fallbacks it covers: they'd match first.
+        dropped = []
+        if not is_fallback(rule):
+            c = Compiled(rule)
+            for r in list(rules):
+                if is_fallback(r) and any(c.test_message(s) is not None
+                                          for s in r.get("samples", [])):
+                    rules.remove(r)
+                    dropped.append(r["name"])
         self._compile(src)
-        self._save(src, f"add {rule['name']} ({src}): {why}")
+        self._save(src, f"add {rule['name']} ({src}): {why}"
+                   + (f"; replaces {', '.join(dropped)}" if dropped else ""))
 
     def replace(self, src, rule, why):
         rules = self.by_source[src]
@@ -237,8 +248,8 @@ def check(rule, src, ruleset, examples, recent=()):
         p.append(f"doesn't match {len(missed)} of the {len(examples)} example "
                  f"lines, e.g. {missed[0][:300]!r}")
     for older in ruleset.compiled.get(src, ()):
-        if older.name == name:
-            continue
+        if older.name == name or is_fallback(older.rule):
+            continue  # a covered fallback is dropped when this rule is added
         hits = [s for s in older.rule.get("samples", [])
                 if c.test_message(s) is not None]
         if hits:
@@ -318,6 +329,10 @@ def shape_regex(message):
     return "^" + rx + ("$" if len(shape) < 300 else "")
 
 
+def is_fallback(rule):
+    return bool(rule.get("fallback")) or rule.get("name", "").startswith("unlearned_")
+
+
 def fallback(examples, name, why):
     """When no proper rule could be made: match lines of this exact shape,
     collect them and flag the rule for review. (Matching the exact line
@@ -327,5 +342,7 @@ def fallback(examples, name, why):
     rx = shape_regex(e["MESSAGE"])
     if re.search(rx, e["MESSAGE"]) is None:  # template quirk: exact line it is
         rx = "^" + re.escape(e["MESSAGE"]) + "$"
-    return make({"name": name, "regex": rx, "actions": [{"block": "collect"}]},
+    rule = make({"name": name, "regex": rx, "actions": [{"block": "collect"}]},
                 [e], flagged=True, review=why)
+    rule["fallback"] = True
+    return rule

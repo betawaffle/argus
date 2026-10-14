@@ -361,6 +361,16 @@ class TestEngine(unittest.TestCase):
         self.assertIsNotNone(rules.Compiled(r).test(ev(b)))
         self.assertIsNone(rules.Compiled(r).test(ev("magicsock: something else")))
 
+    def test_rule_replaces_covered_fallback(self):
+        rs = rules.RuleSet(tempfile.mkdtemp())
+        rs.add("demo.service", rules.fallback([ev("derp-9 connected")],
+                                              "unlearned_demo_1", "t"), "fallback")
+        good = rules.make({"name": "derp_connected", "regex": r"derp-(?P<n>\d+) connected",
+                           "actions": [{"block": "count"}]}, [ev("derp-9 connected")])
+        self.assertEqual(rules.check(good, "demo.service", rs, [ev("derp-9 connected")]), [])
+        rs.add("demo.service", good, "t")
+        self.assertEqual([r["name"] for r in rs.all()], ["derp_connected"])
+
     def test_proposal_cap(self):
         rs = rules.RuleSet(tempfile.mkdtemp())
         bad = {"name": "x_rule", "regex": "(", "actions": [{"block": "count"}],

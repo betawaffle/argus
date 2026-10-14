@@ -228,8 +228,10 @@ def _rate(examples):
     span = (max(ts) - min(ts)) / 3600 if ts else 0
     if len(ts) < 2 or span <= 0:
         return ""
-    return (f" over {span:.1f} hours, about {len(ts) / span * 24:.0f} a day at this "
-            "rate (normal volume: set thresholds well above it)")
+    per_day = len(ts) / span * 24
+    return (f" over {span:.1f} hours, about {per_day:.0f} a day. A threshold on "
+            f"these should be about n={max(5, round(per_day * 4, -1)):.0f} per day "
+            "(4x normal)")
 
 
 def _without(ruleset, name):
