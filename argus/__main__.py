@@ -161,6 +161,10 @@ def main():
     re_.add_argument("--host", default="local")
     re_.add_argument("--since", default="-7d", help="journal window start (default -7d)")
     re_.set_defaults(func=engine.examples)
+    ri = r.add_parser("import-requests", help="record argus's model traffic of "
+                      "the last 3 days from its transcripts, so the model server's "
+                      "lines about it aren't learned")
+    ri.set_defaults(func=engine.import_requests)
     rl = r.add_parser("list", help="show rules with hit counts")
     rl.set_defaults(func=cmd_rules_list)
     args = ap.parse_args()

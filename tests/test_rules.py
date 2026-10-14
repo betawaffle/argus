@@ -448,6 +448,18 @@ class TestEngine(unittest.TestCase):
         shapes = sorted(r[0] for r in eng.db.execute("SELECT shape FROM pending"))
         self.assertEqual(shapes, ["demo line", "someone else's request"])
 
+    def test_import_transcripts(self):
+        from argus import llm
+        d = Path(tempfile.mkdtemp())
+        ok = [{"t": 100, "kind": "user"}, {"t": 130, "kind": "assistant", "message": {}}]
+        failed = [{"t": 200, "kind": "user"}, {"t": 220, "kind": "tool"}]
+        (d / "a.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ok))
+        (d / "b.jsonl").write_text("".join(json.dumps(r) + "\n" for r in failed))
+        llm.REQUEST_LOG.unlink(missing_ok=True)
+        self.assertEqual(llm.import_transcripts(d, 0), 2)
+        self.assertEqual(llm.own_requests(0), [(100.0, 130.0), (200.0, 1120.0)])
+        self.assertEqual(llm.import_transcripts(d, 0), 0)   # idempotent
+
     def test_proposal_cap(self):
         rs = rules.RuleSet(tempfile.mkdtemp())
         bad = {"name": "x_rule", "regex": "(", "actions": [{"block": "count"}],

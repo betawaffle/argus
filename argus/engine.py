@@ -288,6 +288,13 @@ def examples(args):
     print(f"kept {eng.keep_examples(args.since)} example events")
 
 
+def import_requests(args):
+    """Record past model traffic from transcripts (see llm.import_transcripts)."""
+    from .llm import import_transcripts
+    n = import_transcripts(DATA_DIR / "transcripts", time.time() - 3 * 86400)
+    print(f"{n} request windows recorded from transcripts")
+
+
 def main(args):
     eng = Engine(args.host, log=lambda m: print(m, file=sys.stderr))
     eng.run(learn_limit=args.learn, investigate_limit=args.investigate,

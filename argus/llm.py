@@ -73,3 +73,29 @@ def prune_requests(since):
         REQUEST_LOG.write_text("".join(f"{a:.3f}\t{b:.3f}\n" for a, b in keep))
     except OSError:
         pass
+
+
+def import_transcripts(transcript_dir, since):
+    """Recover request windows from agent transcripts, for model traffic from
+    before argus recorded it. Each transcript counts as one window from its
+    first record to its last; one that ends without a final answer (the
+    request failed, which is when the server dumps the model's output) gets
+    15 more minutes. Returns how many windows were added."""
+    found = []
+    for path in sorted(Path(transcript_dir).glob("*.jsonl")):
+        try:
+            recs = [json.loads(line) for line in path.read_text().splitlines() if line]
+        except (OSError, ValueError):
+            continue
+        ts = [r["t"] for r in recs if "t" in r]
+        if not ts or ts[-1] < since:
+            continue
+        last = recs[-1]
+        answered = (last.get("kind") == "assistant"
+                    and not (last.get("message") or {}).get("tool_calls"))
+        found.append((ts[0], ts[-1] if answered else ts[-1] + 900))
+    known = own_requests(since)
+    new = [w for w in found if w not in known]
+    for a, b in new:
+        _log_request(a, b)
+    return len(new)

@@ -403,3 +403,14 @@ all 10 learn calls writing rules for argus's own reasoning. Fixes:
   trailing whitespace now.
 - **Action shapes**: 8 proposals were rejected for writing a block as `"count"`
   or `{"count": {...}}`. Those are accepted and normalized now.
+
+## Trial run 7 (2026-10-14)
+
+The skip works on fresh data: two new HTTP 500 dumps during the follow-up
+batches (41 lines) were skipped and nothing was learned from them. But trial
+6's dump, from before argus recorded its requests, was still in the 6-hour
+window, and about 30 rules were learned from it. `python -m argus rules
+import-requests` recovers request windows for the last 3 days from the agent
+transcripts (a transcript that ends without an answer, i.e. a failed request,
+gets 15 extra minutes, since that's when the dump is written), so a reset and
+re-run doesn't learn it again.
