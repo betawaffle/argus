@@ -132,10 +132,15 @@ def mark_mirrored(events, chunk=2000):
     yield from flush()
 
 
-TRACEBACK = re.compile(r"Traceback \(most recent call last\):\s*$")
+# A block starts at a traceback, or at asyncio's "Task exception was never
+# retrieved" (logged just before its future: line and traceback).
+TRACEBACK = re.compile(r"Traceback \(most recent call last\):\s*$"
+                       r"|Task exception was never retrieved\s*$")
 CONTINUES = re.compile(
     r"^(\s|$)"                                    # indented frame / code line
     r"|^\^+\s*$"                                  # caret markers
+    r"|^>\s*File \""                              # loguru marks the catching frame
+    r"|^future: <"                                 # asyncio's task line
     r"|^(During handling of the above|The above exception was)"
     r"|^Traceback \(most recent call last\)"
     r"|^[A-Za-z_][\w.]*(Error|Exception|Exit|Interrupt|Warning|Group)\b")

@@ -299,6 +299,36 @@ class TestEngine(unittest.TestCase):
         tail = list(events.join_multiline(batch[:-1]))
         self.assertEqual(tail[-1]["__CURSOR"], "c5")
 
+    def test_join_loguru_traceback(self):
+        # The shape Open WebUI (loguru + asyncio) writes, abridged.
+        lines = [
+            "2026-10-14 12:00:00.000 | ERROR    | asyncio.runners:run:118 - "
+            "Task exception was never retrieved",
+            "future: <Task finished name='Task-9' coro=<f() done> exception=KeyError()>",
+            "Traceback (most recent call last):",
+            '  File "/x/engineio/base_server.py", line 237, in _get_socket',
+            "    s = self.sockets[sid]",
+            "KeyError: None",
+            "",
+            "During handling of the above exception, another exception occurred:",
+            "",
+            "Traceback (most recent call last):",
+            '> File "/x/socketio/async_server.py", line 619, in _handle_event_internal',
+            "    r = await server._trigger_event(data[0], namespace, sid, *data[1:])",
+            "    │       └ <socketio.AsyncServer object>",
+            '  File "/app/socket/main.py", line 300, in get_session',
+            "    raise KeyError('Session not found')",
+            "KeyError: 'Session not found'",
+        ]
+        c = {"CONTAINER_ID": "w"}
+        batch = [ev(m, cursor=f"c{i}", t=1_760_000_000 + 0.001 * i, **c)
+                 for i, m in enumerate(lines)]
+        batch.append(ev("INFO: GET /api/v1/chats", cursor="c99", t=1_760_000_001, **c))
+        out = list(events.join_multiline(batch))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["__LINES"], len(lines))
+        self.assertIn("Session not found", out[0]["MESSAGE"])
+
     def test_new_rule_is_quiet_in_its_first_run(self):
         rs = rules.RuleSet(tempfile.mkdtemp())
         llm = FakeLLM([{"name": "unit_started", "regex": r"Started (?P<unit>\S+) now",
