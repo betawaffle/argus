@@ -1,6 +1,6 @@
 # Design: a labeling tool for Andy
 
-Status: **draft for discussion (Andy + Claude). Nothing is built yet.**
+Status: **design agreed in outline (Andy + Claude, 2026-10-14). Nothing is built yet.**
 
 ## The idea
 
@@ -29,6 +29,10 @@ of disagreements, a fast keyboard flow, optional confidence and notes).
 - **It lives inside the argus repo for now**, as a separate package that
   never imports argus, so it can move out later. argus itself may become
   more generic than log lines over time.
+- **Mark kinds** start as `wrong`, `good`, `from_here`, `missing` (2026-10-14).
+- **Verdict** is `good / bad / unsure` with an optional confidence.
+- **JavaScript is fine** for the review screen.
+- **Adapters:** reports, rules and alerts. If only one can come first, reports.
 
 ## The pieces
 
@@ -105,6 +109,14 @@ Mark(part="regex", span=(6, 8), kind="wrong", note="too broad, matches every pro
     the PID"). Its span marks where it should go, or it's on the whole item.
 - `note`: optional free text
 
+### Related items: when the fault is upstream
+
+An item can list **refs** to other items, e.g. an alert refs the rule that
+raised it. A bad alert is evidence against its rule, so the review screen
+shows the ref, and a mark can point into the referenced item's parts too
+("the threshold in this rule is too low"). The core only stores the link.
+What it means is up to the adapter, which in v0 does nothing with it.
+
 ### Source adapter: the only source-specific code
 
 ```python
@@ -129,7 +141,14 @@ a label is saved. In v0 nothing calls back. Labels are just stored.
    `from_here` works naturally. The events it looked at are the context.
    The question: is this report right, and is the verdict right?
 
-These two are deliberately different shapes, short structured code versus
+3. **`argus.alert`**: one item per alert a rule raised. The part is the
+   alert's summary. The context is the matching events and a link to the
+   rule that raised it. The question: was this worth your attention? A
+   `bad` verdict here means "this alert shouldn't have been created", which
+   is a fault in the rule's action (wrong threshold, wrong severity, or it
+   shouldn't alert at all), not in the alert text.
+
+The first two are deliberately different shapes, short structured code versus
 long prose, so the core gets tested on both from the start.
 
 ## The review screen
@@ -145,9 +164,8 @@ One item per screen at `/label` on the existing argus page (:8082):
   note on the whole item.
 - `Enter` saves and moves to the next item. `u` goes back.
 
-This needs a little JavaScript, which would be argus's first; every page so
-far is plain HTML forms. The core would be one small vanilla-JS file with no
-build step.
+This is argus's first JavaScript; every other page is plain HTML forms. It
+will be one small vanilla-JS file with no build step.
 
 ## Storage
 
@@ -169,13 +187,6 @@ copy or export on their own.
 - **Export** to JSONL for fine-tuning.
 - **Categories** for marks, once the notes show which ones keep coming up.
 
-## Open questions for Andy
+## Open questions
 
-1. Are the four mark kinds (`wrong`, `good`, `from_here`, `missing`) right
-   for a start, or is one missing or unnecessary?
-2. Verdict scale: `good / bad / unsure` plus an optional confidence, or a
-   single 1-5 scale?
-3. Is a small amount of JavaScript on the page OK? Selecting text to mark it
-   needs it.
-4. Which adapter first, rules or reports? Rules exist in larger numbers now.
-   Reports are where `from_here` gets interesting.
+None right now. The first round was answered on 2026-10-14 (see Decided).
