@@ -301,10 +301,31 @@ def make(proposal, examples, flagged=False, review=""):
     return rule
 
 
+PLACEHOLDER_RX = {
+    "<UUID>": r"[0-9a-fA-F-]{36}", "<IP>": r"[\d.]+(?::\d+)?",
+    "<IP6>": r"[0-9a-fA-F:]+", "<HEX>": r"(?:0x)?[0-9a-fA-F]+",
+    "<DUR>": r"[\d.a-zµ]+", "<N>": r"\d+(?:\.\d+)?",
+}
+
+
+def shape_regex(message):
+    """A regex for the line's shape: its text with the varying parts (numbers,
+    IDs, durations) left open, as template() sees them."""
+    shape = template(message)
+    rx = re.escape(shape)
+    for ph, part in PLACEHOLDER_RX.items():
+        rx = rx.replace(re.escape(ph), part)
+    return "^" + rx + ("$" if len(shape) < 300 else "")
+
+
 def fallback(examples, name, why):
-    """When no proper rule could be made: match only this exact line, collect
-    its matches and flag it for review."""
+    """When no proper rule could be made: match lines of this exact shape,
+    collect them and flag the rule for review. (Matching the exact line
+    instead would let a line with a counter or an age in it make a new
+    fallback every minute.)"""
     e = examples[0]
-    return make({"name": name, "regex": "^" + re.escape(e["MESSAGE"]) + "$",
-                 "actions": [{"block": "collect"}]},
+    rx = shape_regex(e["MESSAGE"])
+    if re.search(rx, e["MESSAGE"]) is None:  # template quirk: exact line it is
+        rx = "^" + re.escape(e["MESSAGE"]) + "$"
+    return make({"name": name, "regex": rx, "actions": [{"block": "collect"}]},
                 [e], flagged=True, review=why)

@@ -19,6 +19,8 @@ SUBS = [
     (re.compile(r"\b[0-9a-f:]*:[0-9a-f:]*:[0-9a-f:]+\b", re.I), "<IP6>"),
     (re.compile(r"\b0x[0-9a-f]+\b", re.I), "<HEX>"),
     (re.compile(r"\b[0-9a-f]{12,}\b", re.I), "<HEX>"),
+    # Durations, also glued to a word: "cr10h28m0s", "took 250ms".
+    (re.compile(r"(?<![\d.])(?:\d+(?:\.\d+)?(?:ms|us|µs|ns|h|m|s|d))+(?![A-Za-z\d])"), "<DUR>"),
     # Not digits inside names like i8042, sda1 or ext4.
     (re.compile(r"(?<![A-Za-z_\d])\d+(?:\.\d+)?"), "<N>"),
 ]

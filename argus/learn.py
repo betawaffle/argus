@@ -9,7 +9,7 @@ rules that source already has, and tools:
   run            the usual read-only commands, to judge how much to care
 
 If no valid rule comes out of it, argus stores a fallback that matches only
-the exact line, collects what it matches and is flagged for review.
+lines of the same shape, collects what it matches and is flagged for review.
 """
 
 import json

@@ -326,3 +326,9 @@ broad" check rejected exactly those rules (33-109 shapes against a limit of
   otherwise blocks every later one.
 - **Thresholds**: 3-5x the normal daily volume, not "well above" (trial 3 set
   one at 40x, so it would never fire).
+- **Shapes with durations.** tailscaled logs connection ages glued to words
+  (`derp-9=cr10h28m0s`), so its line had a new shape every minute. Every
+  learn slot of a 10-minute batch went to those, and each exact-line
+  fallback never matched again. `template()` now turns durations into
+  `<DUR>`, even inside a word. Fallbacks now match the line's shape (its
+  text, with the varying parts left open) rather than the exact line.

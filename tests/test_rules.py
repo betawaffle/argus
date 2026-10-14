@@ -351,6 +351,16 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(eng.db.execute("SELECT summary FROM alerts").fetchall(),
                          [("new u9",)])
 
+    def test_shape_with_durations(self):
+        from argus.patterns import template
+        a = "magicsock: 2 active derp conns: derp-9=cr10h28m0s,wr10h28m0s"
+        b = "magicsock: 2 active derp conns: derp-9=cr10h29m0s,wr10h29m0s"
+        self.assertEqual(template(a), template(b))
+        self.assertEqual(template("ext4 on sda1, took 250ms"), "ext4 on sda1, took <DUR>")
+        r = rules.fallback([ev(a)], "unlearned_x_1", "test")
+        self.assertIsNotNone(rules.Compiled(r).test(ev(b)))
+        self.assertIsNone(rules.Compiled(r).test(ev("magicsock: something else")))
+
     def test_proposal_cap(self):
         rs = rules.RuleSet(tempfile.mkdtemp())
         bad = {"name": "x_rule", "regex": "(", "actions": [{"block": "count"}],
