@@ -5,11 +5,18 @@ Stdlib only, so it runs on any box with python3 and nothing installed.
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 DEFAULT_URL = os.environ.get("ARGUS_LLM_URL", "http://framework:8081/v1")
 DEFAULT_MODEL = os.environ.get("ARGUS_LLM_MODEL", "gpt-oss-120b")
+# When argus's own requests ran, so the engine can tell the model server's log
+# lines about them (or, after an error, the model's whole output dumped one
+# line at a time) from everyone else's. Tab-separated start and end times.
+REQUEST_LOG = Path(os.environ.get("ARGUS_DATA", Path.home() / ".local/share/argus")) \
+    / "llm-requests.tsv"
 
 
 class LLM:
@@ -29,10 +36,40 @@ class LLM:
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
         )
+        t0 = time.time()
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = json.load(resp)
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"LLM server: HTTP {e.code}: "
                                f"{e.read().decode(errors='replace')[:500]}") from None
+        finally:
+            _log_request(t0, time.time())
         return raw["choices"][0]["message"], raw.get("usage", {}), raw
+
+
+def _log_request(t0, t1):
+    try:
+        REQUEST_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(REQUEST_LOG, "a") as f:
+            f.write(f"{t0:.3f}\t{t1:.3f}\n")
+    except OSError:
+        pass  # bookkeeping only; never fail a request over it
+
+
+def own_requests(since):
+    """[(start, end)] of argus's requests that ended after since, sorted."""
+    try:
+        rows = [line.split("\t") for line in REQUEST_LOG.read_text().splitlines()]
+    except OSError:
+        return []
+    return sorted((float(a), float(b)) for a, b in rows if float(b) >= since)
+
+
+def prune_requests(since):
+    """Forget requests that ended before since."""
+    keep = own_requests(since)
+    try:
+        REQUEST_LOG.write_text("".join(f"{a:.3f}\t{b:.3f}\n" for a, b in keep))
+    except OSError:
+        pass

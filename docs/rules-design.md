@@ -381,3 +381,25 @@ counts what the proposed regex matches in the batch, over the hours the batch
 covers, and rejects n below 2x normal or above 10x (with a suggested n of 4x).
 The task shows the group's rate over the whole batch. Batches shorter than an
 hour aren't used for this.
+
+## Trial run 6 (2026-10-14)
+
+25,049 lines, 155 groups, 27 rules (4 fallbacks, all one-off llm-server
+startup lines), 14.5 minutes. Thresholds are now in range (3.6x and 4x); the
+check rejected one proposal and the model fixed it.
+
+The follow-up batch found a **feedback loop**: one of argus's own requests got
+HTTP 500, llama-server dumped the model's whole output into its journal one
+line at a time ("Thus propose rule.", `"actions": [`), and the next batch spent
+all 10 learn calls writing rules for argus's own reasoning. Fixes:
+
+- `llm.py` records when each of argus's requests ran
+  (`$ARGUS_DATA/llm-requests.tsv`, last 3 days kept). Unmatched lines from the
+  model's unit (`ARGUS_LLM_UNIT`, default `llm-server.service`) written during
+  one of them (2 s before to 10 s after) are counted and skipped, never
+  learned. Lines a rule matches are still handled as usual.
+- **Echoes with trailing spaces**: the container check compared lines with only
+  the newline stripped, so `[42823] ` and `[42823]` didn't match. It strips all
+  trailing whitespace now.
+- **Action shapes**: 8 proposals were rejected for writing a block as `"count"`
+  or `{"count": {...}}`. Those are accepted and normalized now.
