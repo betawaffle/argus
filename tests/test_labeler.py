@@ -348,10 +348,10 @@ class ArgusSourcesTest(unittest.TestCase):
 
     def test_items(self):
         reports = list(label_sources.Reports(self.db).items())
-        self.assertEqual(sorted(i.key for i in reports), ["finding:1", "investigation:1"])
+        self.assertEqual(sorted(i.key for i in reports), ["finding:1", "investigation:1@2"])
         finding = next(i for i in reports if i.key == "finding:1")
         self.assertEqual(len(finding.parts), 3)                  # one part per paragraph
-        inv = next(i for i in reports if i.key == "investigation:1")
+        inv = next(i for i in reports if i.key == "investigation:1@2")
         self.assertEqual(inv.refs, [("argus.rule", "demo_rule")])
         (alert,) = label_sources.Alerts(self.db).items()
         self.assertEqual(alert.refs, [("argus.rule", "demo_rule")])
@@ -382,6 +382,20 @@ class ArgusSourcesTest(unittest.TestCase):
         alert = next(iter(label_sources.Alerts(self.db).items()))
         self.assertEqual([p.id for p in alert.context][:2], ["event", "data"])
         self.assertEqual(alert.context[1].text, "n=7")
+
+    def test_reset_ids_are_new_items(self):
+        # After `rules reset`, alert ids start over; a new alert 1 is a new item.
+        store = Store(":memory:")
+        store.sync([label_sources.Alerts(self.db)])
+        old = store.queue("andy")[0]["id"]
+        store.save_label(old, "andy", "bad")
+        self.db.execute("DELETE FROM alerts")
+        self.db.execute("INSERT INTO alerts (id, rule, t, severity, summary, message, data) "
+                        "VALUES (1, 'demo_rule', 99, 'watch', 'boom 5x', 'boom', '{}')")
+        store.sync([label_sources.Alerts(self.db)])
+        (new,) = store.queue("andy")
+        self.assertNotEqual(new["key"], "alert:1@3")
+        self.assertEqual(store.previous_label(new["id"], "andy"), (None, None))
 
     def test_sync_through_store(self):
         store = Store(":memory:")
