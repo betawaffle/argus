@@ -348,6 +348,31 @@
   }
   function toggleGroup() { S.showGroup = !S.showGroup; render(); }
 
+  function describeChange(c) {
+    const names = ids => ids.map(id => {
+      const b = findBlock(ITEM.id, id);
+      return b ? b.part.label || id : id;
+    }).join(", ");
+    const bits = [];
+    if (c.changed.length) bits.push("changed: " + names(c.changed));
+    if (c.added.length) bits.push("new: " + names(c.added));
+    if (c.removed.length) bits.push("gone: " + c.removed.join(", "));
+    return bits.length ? `Since then, ${bits.join("; ")}. ` : "";
+  }
+  // K: start from your label on the older version (marks on changed text dropped).
+  function keepEarlier() {
+    if (!L.carry) return toast("No earlier label to keep");
+    const c = L.carry.label;
+    Object.assign(S, { verdict: c.verdict === "skip" ? null : c.verdict, fixable: !!c.fixable,
+                       confidence: c.confidence, note: c.note || "",
+                       marks: c.marks.map(m => ({ ...m })),
+                       links: (c.links || []).map(x => ({ ...x })),
+                       kept: true, dirty: true, sel: null });
+    render();
+    toast("Kept your earlier label" + (L.carry.dropped ?
+      `; ${L.carry.dropped} mark(s) on changed text left out` : "") + ". Enter saves.");
+  }
+
   function renderHelp() {
     const rows = [
       ["select text, then w / g", "mark it wrong / good (no selection: the whole part)"],
@@ -362,6 +387,7 @@
       ["v", "see the other items like this one"],
       ["D", "skip the other items like this (the ticked ones) as duplicates of this one"],
       ["M", "something is missing from the whole item"],
+      ["K", "keep your label from an older version of this item"],
       ["j / k", "move between parts (marks without a selection go here)"],
       [", / .", "previous / next mark"],
       ["r", "toggle whether the selected mark is a reason for the verdict"],
@@ -407,12 +433,19 @@
       !ITEM.current && h("div", { class: "banner" },
         "This is an older version; the item has changed since."),
       prior && prior.verdict !== "skip" && h("div", { class: "banner muted" },
-        `Editing your label from ${new Date(prior.t * 1000).toLocaleString()}.`),
-      L.previous && h("div", { class: "banner muted" },
+        prior.carried_from
+          ? ["Your label from an older version, carried over because only the " +
+             "context changed. ", h("a", { href: `${L.prefix}/i/${prior.carried_from}` },
+                                    "see that version")]
+          : `Editing your label from ${new Date(prior.t * 1000).toLocaleString()}.`),
+      L.previous && !S.kept && h("div", { class: "banner" },
         `You labeled an older version of this: ${L.previous.verdict}` +
         (L.previous.marks.length ? `, ${L.previous.marks.length} marks` : "") +
         (L.previous.note ? ` (“${L.previous.note}”)` : "") + ". ",
-        h("a", { href: `${L.prefix}/i/${L.previous.item_id}` }, "see it")),
+        L.carry && describeChange(L.carry.changed),
+        h("a", { href: `${L.prefix}/i/${L.previous.item_id}` }, "see it"),
+        L.carry ? [" · ", h("a", { href: "#", onclick: e => { e.preventDefault(); keepEarlier(); } },
+                            "keep that label"), " (K)"] : null),
       L.state === "later" && h("div", { class: "banner" },
         L.todo_left ? "You skipped this earlier to come back to."
                     : "Nothing new is waiting: these are the items you skipped earlier."),
@@ -600,6 +633,7 @@
     let handled = true;
     if (KINDS[k]) addMark(KINDS[k]);
     else if (k === "M") addMark("missing", true);
+    else if (k === "K") keepEarlier();
     else if (k === "d") openPicker("duplicate");
     else if (k === "l") openPicker("related");
     else if (k === "D") markGroupDuplicates();
