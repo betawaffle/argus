@@ -60,6 +60,12 @@ things later.
 - **Every rule keeps a hit counter and last-hit time**, separately from its
   action, even for `ignore`. This is metadata, not the action's state. It
   lets us find dead rules and see what's noisy.
+- **Rule files are TOML**, in their own local git repo on the box
+  (`~/work/argus-rules`, not on GitHub).
+- **Read every priority level.** Audit entries have no priority at all.
+- **Build order:** the normal path first (new lines only), then backfill
+  as a trial run before it goes live. If backfill shows problems, rework
+  and restart from scratch. The old daily scan keeps running until then.
 - **Backfill** (the first run over existing history) needs extra machinery
   and probably a different strategy for the LLM part. It's handled
   separately from the steady state.
@@ -227,3 +233,37 @@ dumps logged one row at a time: installer file lists, dnf transaction
 tables, llama-server's `--help` inside containers, and kernel boot output.
 A good first measurement for the new design is how many LLM calls it takes
 to cover 95% and 99% of lines.
+
+## First test on the box (2026-10-13)
+
+Two runs over a 3-hour window of the box's journal with gpt-oss-120b: 30
+rules learned, all 30 accepted, no fallbacks, no errors. After one pass the
+rules matched 99.8% of the window without the model. Typical cost per rule:
+2-4 model steps and 6-55 s; worst case 121 s.
+
+What it taught us, and what changed:
+
+- **Values that are always new.** llama-server prefixes each line with an
+  uptime stamp like `330.46.111.636`; the model took it for a client IP and
+  used `distinct` on it, so every line raised "new client". Validation now
+  rejects `distinct`/`track` with an alert on a field that differs on more
+  than 80% of the lines it sees.
+- **Container lines logged twice.** A unit that runs podman attached logs
+  every container line once with CONTAINER_ID and once more as the unit's
+  stdout. The engine now skips the stdout copy when the container copy is
+  within 2,000 events of it. Running the container detached would avoid the
+  duplicate at the source.
+- **argus watching itself.** Each model request makes about 8 llama-server
+  lines, so the second run spent its whole learn budget on argus's own
+  traffic. Once those rules exist this costs nothing, so it is left alone.
+- **CODE_FILE on container output** is conmon's forwarding call, the same for
+  every line, so it no longer counts as narrowing for `<unit>/container`.
+- **SYSLOG_IDENTIFIER** is now matchable: the model reached for it constantly,
+  and inside an already-trusted source it can only narrow.
+- **`{new}` in distinct's on_new**, and unknown placeholders in a flag summary
+  stay as written instead of leaving the whole summary unformatted.
+- **The proposal cap is enforced**: past 4 proposals the model is refused and
+  argus stores a fallback.
+- **Prompt**: collect only what a human should read; routine changes (DHCP
+  leases, NAT endpoints) are watch at most; distinct/track need a field that
+  repeats.

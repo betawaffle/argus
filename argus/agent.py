@@ -16,6 +16,8 @@ DATA_DIR = Path(os.environ.get("ARGUS_DATA", Path.home() / ".local/share/argus")
 
 
 class Agent:
+    _n = 0
+
     def __init__(self, system, llm=None, tools=default_tools, max_steps=20,
                  transcript_dir=DATA_DIR / "transcripts"):
         self.llm = llm or LLM()
@@ -23,7 +25,10 @@ class Agent:
         self.max_steps = max_steps
         self.messages = [{"role": "system", "content": system}]
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        self.transcript = transcript_dir / time.strftime("%Y%m%d-%H%M%S.jsonl")
+        # Several agents can start within one second, so add pid and a counter.
+        Agent._n += 1
+        self.transcript = transcript_dir / (time.strftime("%Y%m%d-%H%M%S")
+                                            + f"-{os.getpid()}-{Agent._n}.jsonl")
 
     def log(self, kind, **data):
         with open(self.transcript, "a") as f:

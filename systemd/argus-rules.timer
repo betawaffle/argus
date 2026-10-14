@@ -1,0 +1,10 @@
+# Not installed by install.sh yet: the rule engine goes live after backfill.
+[Unit]
+Description=argus rule engine, every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=10min
+
+[Install]
+WantedBy=timers.target
