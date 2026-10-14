@@ -54,6 +54,32 @@ class CoreTest(unittest.TestCase):
         self.store.sync([src])
         self.assertIsNone(self.store.current_id("demo", "a"))
 
+    def test_carry_forward_when_only_context_changed(self):
+        ctx = lambda t: [Part("where", "field", t)]
+        src = ListSource("demo", [item("a", context=ctx("seen 1 times")),
+                                  item("b", context=ctx("x"))])
+        self.store.sync([src])
+        a1, b1 = self.store.current_id("demo", "a"), self.store.current_id("demo", "b")
+        self.store.save_label(a1, "andy", "good", marks=[
+            {"kind": "good", "part": "p1", "start": 0, "end": 5}], note="fine")
+        self.store.save_label(b1, "andy", "bad", marks=[
+            {"kind": "wrong", "part": "where"}])
+        # a: only context changed -> carried. b: a marked part changed -> not.
+        src.list = [item("a", context=ctx("seen 2 times")), item("b", context=ctx("y"))]
+        self.store.sync([src])
+        a2, b2 = self.store.current_id("demo", "a"), self.store.current_id("demo", "b")
+        lab = self.store.latest_label(a2, "andy")
+        self.assertEqual((lab["verdict"], lab["note"], lab["carried_from"]), ("good", "fine", a1))
+        self.assertEqual(lab["marks"][0]["item_id"], a2)
+        self.assertIsNone(self.store.latest_label(b2, "andy"))
+        label, dropped, changed = self.store.carried_label(b2, "andy")
+        self.assertEqual((label["verdict"], dropped, changed["changed"]), ("bad", 1, ["where"]))
+        # judged text changed -> never carried automatically
+        src.list = [item("a", "first\n\nedited", context=ctx("seen 2 times")),
+                    item("b", context=ctx("y"))]
+        self.store.sync([src])
+        self.assertIsNone(self.store.latest_label(self.store.current_id("demo", "a"), "andy"))
+
     def test_priority_doesnt_make_a_new_version(self):
         src = ListSource("demo", [item("a", priority=1)])
         self.store.sync([src])

@@ -176,14 +176,18 @@ class App:
             refs.append(ref or {"id": None, "source": source, "key": key,
                                 "title": f"{source}: {key} (not available)",
                                 "parts": [], "context": []})
-        prev_id, prev = (None, None)
+        prev_id, prev, carry = None, None, None
         label = self.store.latest_label(item_id, self.by)
         if label is None:
             prev_id, prev = self.store.previous_label(item_id, self.by)
+            carried, dropped, changed = self.store.carried_label(item_id, self.by)
+            if carried:
+                carry = {"label": carried, "dropped": dropped, "changed": changed}
         source = q.get("source")
         data = {
             "item": item, "refs": refs, "label": label,
             "previous": prev and {**prev, "item_id": prev_id},
+            "carry": carry,
             "api": f"{self.prefix}/api/label",
             "queue": f"{self.prefix}" + (f"?source={urllib.parse.quote(source)}"
                                          if source else ""),

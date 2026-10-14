@@ -115,7 +115,7 @@ CREATE INDEX IF NOT EXISTS links_label ON links (label_id);
 """
 # Columns added after the first release: (table, column, type).
 MIGRATIONS = [("marks", "fix", "TEXT"), ("items", "grp", "TEXT DEFAULT ''"),
-              ("items", "live", "TEXT")]
+              ("items", "live", "TEXT"), ("labels", "carried_from", "INTEGER")]
 
 
 class Store:
@@ -166,6 +166,7 @@ class Store:
             for k in gone:
                 self.db.execute("UPDATE items SET current=0 WHERE source=? AND key=?",
                                 (src.name, k))
+        self.carry_forward()
         self.db.commit()
         return new
 
@@ -252,7 +253,7 @@ class Store:
 
     # --- labels -------------------------------------------------------------
     def save_label(self, item_id, by, verdict, marks=(), fixable=None, confidence=None,
-                   note="", links=()):
+                   note="", links=(), carried_from=None):
         """Append a label. Labels are never edited: the latest one per labeler counts.
 
         marks: dicts with kind, and optionally item_id, part, start, end,
@@ -287,11 +288,11 @@ class Store:
             if x["target"] == item_id:
                 raise ValueError("an item can't link to itself")
         cur = self.db.execute(
-            "INSERT INTO labels (item_id, by, t, verdict, fixable, confidence, note) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO labels (item_id, by, t, verdict, fixable, confidence, note, "
+            "carried_from) VALUES (?,?,?,?,?,?,?,?)",
             (item_id, by, time.time(), verdict,
              None if verdict != "bad" or fixable is None else int(bool(fixable)),
-             confidence, note or ""))
+             confidence, note or "", carried_from))
         lid = cur.lastrowid
         for m in marks:
             self.db.execute(
@@ -309,12 +310,12 @@ class Store:
 
     def latest_label(self, item_id, by):
         row = self.db.execute(
-            "SELECT id, t, verdict, fixable, confidence, note FROM labels "
+            "SELECT id, t, verdict, fixable, confidence, note, carried_from FROM labels "
             "WHERE item_id=? AND by=? ORDER BY id DESC LIMIT 1", (item_id, by)).fetchone()
         if not row:
             return None
-        lid, t, verdict, fixable, confidence, note = row
-        return {"id": lid, "t": t, "verdict": verdict,
+        lid, t, verdict, fixable, confidence, note, carried = row
+        return {"id": lid, "t": t, "verdict": verdict, "carried_from": carried,
                 "fixable": None if fixable is None else bool(fixable),
                 "confidence": confidence, "note": note, "marks": self._marks(lid),
                 "links": self._links(lid)}
@@ -351,6 +352,59 @@ class Store:
                             links=[{"kind": "duplicate", "target": item_id,
                                     "note": "marked with its whole group"}])
         return len(others)
+
+    # --- labels across versions -----------------------------------------------
+    def carried_label(self, item_id, by):
+        """`by`'s label on an older version of item_id, moved onto this version:
+        marks on parts whose text changed or went away are dropped. Returns
+        (label, dropped marks, what changed) or (None, 0, None)."""
+        old_id, old_label = self.previous_label(item_id, by)
+        if old_label is None:
+            return None, 0, None
+        old, new = self.item(old_id), self.item(item_id)
+        texts = lambda it: {p["id"]: p["text"] for p in it["parts"] + it.get("context", [])}
+        before, after = texts(old), texts(new)
+        marks, dropped = [], 0
+        for m in old_label["marks"]:
+            if m["item_id"] == old_id:
+                if m["part"] is not None and before.get(m["part"]) != after.get(m["part"]):
+                    dropped += 1
+                    continue
+                m = {**m, "item_id": item_id}
+            marks.append(m)
+        changed = {"changed": [k for k in before if k in after and before[k] != after[k]],
+                   "added": [k for k in after if k not in before],
+                   "removed": [k for k in before if k not in after],
+                   "parts_same": [(p["id"], p["text"]) for p in old["parts"]]
+                   == [(p["id"], p["text"]) for p in new["parts"]],
+                   "from": old_id}
+        label = {**old_label, "marks": marks,
+                 "links": [x for x in old_label["links"] if x["target"] != item_id]}
+        return label, dropped, changed
+
+    def carry_forward(self):
+        """Move labels onto new versions of items when nothing that was judged
+        changed: the parts are identical and no mark points at changed text
+        (only context changed, e.g. a new example or a moved hit count)."""
+        rows = self.db.execute("""
+            SELECT DISTINCT cur.id, l.by FROM items cur
+            JOIN items old ON old.source = cur.source AND old.key = cur.key
+                          AND old.id != cur.id
+            JOIN labels l ON l.item_id = old.id
+            WHERE cur.current = 1 AND NOT EXISTS (
+                SELECT 1 FROM labels x WHERE x.item_id = cur.id AND x.by = l.by)
+            """).fetchall()
+        n = 0
+        for item_id, by in rows:
+            label, dropped, changed = self.carried_label(item_id, by)
+            if label is None or dropped or not changed["parts_same"]:
+                continue
+            self.save_label(item_id, by, label["verdict"], label["marks"],
+                            fixable=label["fixable"], confidence=label["confidence"],
+                            note=label["note"], links=label["links"],
+                            carried_from=changed["from"])
+            n += 1
+        return n
 
     def previous_label(self, item_id, by):
         """The latest label on an older version of the same item, if any."""

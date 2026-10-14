@@ -179,6 +179,16 @@ An item can also have **live** parts: shown with the context, but not part
 of its version, for facts that change all the time like hit counts. Without
 this, every hit would make a rule look new and send it back to the queue.
 
+### When an item changes
+
+A changed item is a new version, and the old version's labels stay with it.
+If nothing that was judged changed (the parts are identical and no mark
+points at changed text, e.g. only an example or a hit count moved), the
+latest label is carried onto the new version automatically, marked as
+carried (`carried_from`). Otherwise the item comes back with a banner saying
+what changed, and `K` starts from the old label, leaving out marks on text
+that changed.
+
 ### Skip for now
 
 `s` skips an item to come back to: skipped items come after everything not
