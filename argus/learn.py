@@ -8,8 +8,8 @@ rules that source already has, and tools:
   test_regex     try a regex on the example lines before proposing
   run            the usual read-only commands, to judge how much to care
 
-If no valid rule comes out of it, argus stores a fallback that matches only
-the exact line, collects what it matches and is flagged for review.
+If no valid rule comes out of it, argus stores a flagged fallback that
+matches the group's template, counts its lines and keeps the first few.
 """
 
 import json
@@ -103,7 +103,7 @@ class Learner:
     def learn(self, src, examples, recent=(), others=()):
         """Make a rule for examples (events from src). Returns (rule, accepted,
         transcript path). Always returns a rule: a fallback if all else fails."""
-        outcome = {"rule": None, "problems": [], "proposals": 0}
+        outcome = {"rule": None, "problems": [], "proposals": 0, "last": None}
 
         def propose_rule(name, actions, reason="", match=None, regex=None,
                          replace=False):
@@ -136,6 +136,7 @@ class Learner:
             real = [p for p in problems if p not in unknown]
             if real:
                 outcome["problems"] = real
+                outcome["last"] = {k: v for k, v in proposal.items() if v}
                 if outcome["proposals"] >= MAX_PROPOSALS:
                     return "problem: too many attempts; stop now."
                 return "problems:\n- " + "\n- ".join(real)
@@ -176,9 +177,13 @@ class Learner:
             outcome["problems"].append(f"error while learning: {e}")
         if outcome["rule"]:
             return outcome["rule"], True, agent.transcript
-        why = ("no valid rule: " + "; ".join(outcome["problems"])[:500]
-               if outcome["problems"] else "the model didn't propose a rule")
-        rule = rules.fallback(examples, self._fallback_name(src), why)
+        # The problems belong to the model's last rejected attempt (kept in
+        # "rejected"), not to the fallback, which is argus's own safe rule.
+        why = ("fallback: the model's rules were all rejected. Its last attempt's "
+               "problems: " + "; ".join(outcome["problems"])[:500]
+               if outcome["problems"] else
+               "fallback: the model didn't propose a rule")
+        rule = rules.fallback(examples, self._fallback_name(src), why, outcome["last"])
         self.ruleset.add(src, rule, "fallback")
         return rule, False, agent.transcript
 

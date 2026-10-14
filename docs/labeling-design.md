@@ -32,6 +32,11 @@ of disagreements, a fast keyboard flow, optional confidence and notes).
   never imports argus, so it can move out later. argus itself may become
   more generic than log lines over time.
 - **Mark kinds** start as `wrong`, `good`, `from_here`, `missing` (2026-10-14).
+  After the first labeling pass, `unsupported`, `unclear`, `should_be` and
+  `no_better_option` were added, picked from Andy's notes.
+- **Duplicates and related items are links, not copied labels.** Andy links
+  an item to one he already judged and leaves it to a later pass (a person
+  or an LLM) to work out what he meant. Labels are never carried across.
 - **Verdict** is `good / bad / unsure` with an optional confidence.
 - **JavaScript is fine** for the review screen.
 - **Adapters:** reports, rules and alerts. If only one can come first, reports.
@@ -118,6 +123,13 @@ Mark(part="regex", span=(6, 8), kind="wrong", reason=True,
     labels for one keypress. This matters most for long text like reports.
   - `missing`: something that should be there isn't ("should also extract
     the PID"). Its span marks where it should go, or it's on the whole item.
+  - `unsupported`: a claim with no evidence behind it ("the disk is
+    failing" with nothing that shows it).
+  - `unclear`: hard to understand, or ambiguous.
+  - `should_be`: this bit should say something else. The mark has a `fix`
+    field with the replacement text ("ignore", "watch").
+  - `no_better_option`: not ideal, but nothing better was available. It is
+    never a reason for a bad verdict by default.
 - `reason`: is this mark a reason for the verdict? (see Decided)
 - `note`: optional free text
 
@@ -133,6 +145,24 @@ raised it. A bad alert is evidence against its rule, so the review screen
 shows the ref, and a mark can point into the referenced item's parts too
 ("the threshold in this rule is too low"). The core only stores the link.
 What it means is up to the adapter, which in v0 does nothing with it.
+
+### Links: duplicates and related items
+
+A label can carry **links** to other items: `duplicate` (this is the same as
+that one) or `related` (look at these together). A link points at the
+target's current version and has an optional note. Nothing interprets links
+yet. They are there so a later pass, by a person or an LLM, can work out
+what was meant, without Andy having to label the same thing twice.
+
+### Groups: near-duplicates
+
+An adapter can give an item a **group** key. Items with the same key are
+near-duplicates: the same finding about different files, alerts from one
+rule, fallback rules from one source. The group is not part of the item's
+version, so regrouping never makes an item look new. The queue shows one
+unlabeled item per group with "+N like this", and an item's screen offers to
+skip the rest of its group as duplicates of it (`D`), which saves a `skip`
+label with a `duplicate` link on each.
 
 ### Source adapter: the only source-specific code
 
@@ -180,8 +210,16 @@ right holds the verdict, fixable, confidence, note and the list of marks.
 - Select some text, then press `w` (wrong) or `g` (good). With nothing
   selected, the key marks the whole part you last clicked (or moved to with
   `j`/`k`).
+- Also on a selection or a part: `e` unsupported, `i` unclear, `o` no
+  better option, and `b` should be, which opens a box for the replacement
+  text.
 - Click a spot, then `h` (went wrong from here) or `m` (missing here).
   `M` says something is missing from the item as a whole.
+- `d` links this item as a duplicate of one you already labeled, `l` as
+  related. A picker lists your recent items with a filter; `Enter` takes
+  the first match. A duplicate link alone is enough to save, as a skip.
+- `D` skips every other unlabeled item in this item's group as a duplicate
+  of this one, after a confirm.
 - Everything after a "from here" mark is dimmed, so you can see what you've
   implicitly called OK.
 - Click a highlight (or use `,` `.`) to select a mark. Then `r` flips whether
@@ -199,8 +237,10 @@ they don't add characters.
 ## Storage
 
 Its own SQLite file, `label.db`, next to `argus.db`
-(`~/.local/share/argus/`), with three tables: `items` (source, key, version
-hash, snapshot JSON, first and last seen, current), `labels` and `marks`. A separate file makes the separation real and the labels easy to
+(`~/.local/share/argus/`), with four tables: `items` (source, key, version
+hash, snapshot JSON, group, first and last seen, current), `labels`, `marks`
+and `links`. New columns are added on startup, so an older `label.db`
+upgrades itself. A separate file makes the separation real and the labels easy to
 copy or export on their own.
 
 ## Not in v0 (later, as we learn)

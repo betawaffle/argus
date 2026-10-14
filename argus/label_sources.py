@@ -13,6 +13,7 @@ into labeler Items. Three sources:
 """
 
 import json
+import re
 import sqlite3
 import time
 
@@ -22,6 +23,14 @@ from .blocks import SCHEMA as BLOCKS_SCHEMA
 from .rules import RuleSet, _toml_value
 
 SEVERITY_PRIORITY = {"attention": 3, "watch": 2, "?": 1}
+
+
+def _shape(text):
+    """Loose shape of a log pattern, for grouping near-duplicate findings:
+    placeholders, numbers and paths dropped, so two findings about the same
+    problem in different files or lines land together."""
+    text = re.sub(r"<[A-Z0-9]+>|/\S+|\d+", "", text or "")
+    return " ".join(text.split()).lower()[:120]
 
 
 def _when(t):
@@ -79,7 +88,7 @@ class Reports(Source, _DB):
                 title=f"{verdict}: {summary or '(no summary)'}",
                 parts=paragraphs(answer), context=context, question=self.QUESTION,
                 priority=SEVERITY_PRIORITY.get(verdict, 0) + (t or 0) / 1e10,
-                link=f"/f/{fid}")
+                link=f"/f/{fid}", group=f"finding|{host}|{ident}|{_shape(tmpl)}")
 
     def _investigations(self):
         rows = self.db.execute(
@@ -97,7 +106,8 @@ class Reports(Source, _DB):
                 parts=paragraphs(report),
                 context=[Part("events", "code", _events_text(evs), "events it looked at")],
                 refs=[("argus.rule", rule)], question=self.QUESTION,
-                priority=2 + (t or 0) / 1e10, link=f"/rules/{rule}")
+                priority=2 + (t or 0) / 1e10, link=f"/rules/{rule}",
+                group=f"investigation|{rule}")
 
 
 class Alerts(Source, _DB):
@@ -121,7 +131,7 @@ class Alerts(Source, _DB):
                 question="Was this alert worth your attention? If not, mark what in "
                          "the rule below made it fire.",
                 priority=SEVERITY_PRIORITY.get(severity, 0) + (t or 0) / 1e10,
-                link=f"/rules/{rule}")
+                link=f"/rules/{rule}", group=f"alert|{rule}")
 
 
 class Rules(Source, _DB):
@@ -150,6 +160,10 @@ class Rules(Source, _DB):
                                 "lines it was written for"),
                            Part("stats", "field", f"{src} · {hits} hits, last {_when(last)}"
                                 f" · created {r.get('created', '?')}", "stats")]
+                if r.get("rejected"):
+                    context.insert(0, Part("rejected", "code", "\n".join(
+                        f"{k} = {_toml_value(v)}" for k, v in r["rejected"].items()),
+                        "the model's last rejected attempt"))
                 if r.get("flagged"):
                     context.insert(0, Part("review", "text", r.get("review", ""),
                                            "flagged for review because"))
@@ -159,7 +173,9 @@ class Rules(Source, _DB):
                     question="Is this a good rule: does it match the right lines, and "
                              "does it do the right thing with them?",
                     priority=(2 if r.get("flagged") else 0) + min(hits or 0, 1e6) / 1e6,
-                    link=f"/rules/{r['name']}")
+                    link=f"/rules/{r['name']}",
+                    # Fallbacks from one source are near-duplicates of each other.
+                    group=f"fallback|{src}" if r["name"].startswith("unlearned_") else "")
 
 
 def sources(db, ruleset=None):

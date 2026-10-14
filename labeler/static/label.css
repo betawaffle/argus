@@ -25,6 +25,16 @@ h2 { margin:4px 0 2px; font-size:18px; }
          cursor:pointer; }
 .k-wrong { --k:var(--wrong); } .k-good { --k:var(--good); }
 .k-from_here { --k:var(--from); } .k-missing { --k:var(--missing); }
+.k-unsupported { --k:var(--unsupported); } .k-unclear { --k:var(--unclear); }
+.k-should_be { --k:var(--should); } .k-no_better_option { --k:var(--nbo); }
+.part.whole-unsupported { border-left-color:var(--unsupported); }
+.part.whole-unclear { border-left-color:var(--unclear); }
+.part.whole-should_be { border-left-color:var(--should); }
+.part.whole-no_better_option { border-left-color:var(--nbo); }
+.marks li.link { border-left-color:var(--muted); }
+.mark-fix { margin-top:4px; }
+.picker input { margin-bottom:8px; }
+.picker li { cursor:pointer; }
 .badge { background:var(--k); }
 .m { background:color-mix(in srgb, var(--k) 22%, transparent);
      border-bottom:2px solid var(--k); cursor:pointer; }

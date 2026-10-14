@@ -27,13 +27,14 @@ from pathlib import Path
 
 from . import blocks
 from .events import MATCHABLE, source
-from .patterns import template
+from .patterns import PRIORITY_NAMES, template
 
 RULES_DIR = Path(os.environ.get("ARGUS_RULES", Path.home() / "work/argus-rules"))
 NAME = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 STRUCTURED = {"MESSAGE_ID", "CODE_FILE", "_AUDIT_TYPE_NAME", "PODMAN_EVENT"}
 MIN_LITERAL = 6        # literal characters a regex needs when nothing else narrows it
-MAX_TEMPLATES = 20     # distinct message shapes one rule may cover in a batch
+NEAR_ALL = 0.95        # a rule matching this share of its source's lines is too broad
+FALLBACK_KEEP = 20     # matching lines a fallback keeps so a human can see them
 MAX_SAMPLES = 5
 
 
@@ -64,7 +65,7 @@ def _toml_key(k):
 
 
 FIELD_ORDER = ["name", "match", "regex", "actions", "flagged", "review",
-               "created", "samples"]
+               "rejected", "created", "samples"]
 
 
 def dump_rules(src, rules):
@@ -245,10 +246,47 @@ def check(rule, src, ruleset, examples, recent=()):
                      f"{hits[0][:200]!r}); the older rule wins, so narrow this one "
                      f"or merge them: {json.dumps(older.rule)}")
     p += identity_problems(rule, c, examples, recent)
-    shapes = {template(e["MESSAGE"]) for e in recent if c.test(e) is not None}
-    if len(shapes) > MAX_TEMPLATES:
-        p.append(f"too broad: matches {len(shapes)} differently shaped lines from "
-                 f"this source, e.g. {sorted(shapes)[:3]}")
+    p += broadness_problems(c, src, examples, recent)
+    return p
+
+
+def _priority(e):
+    try:
+        return int(e.get("PRIORITY"))
+    except (TypeError, ValueError):
+        return None  # audit entries have none
+
+
+def broadness_problems(c, src, examples, recent=()):
+    """Is the rule so broad it would swallow lines it wasn't written for?
+
+    Covering many differently shaped lines is fine (routine chatter from one
+    daemon comes in many shapes). Two things are not:
+    - matching nearly every line from the source, beyond the example group;
+    - sweeping in lines more severe than the examples (warnings or errors when
+      it was written for info lines), which would hide trouble.
+    """
+    p = []
+    matched = [e for e in recent if c.test(e) is not None]
+    if not matched:
+        return p
+    own = {template(e["MESSAGE"]) for e in examples}
+    extra = [e for e in matched if template(e["MESSAGE"]) not in own]
+    if len(recent) >= 50 and len(matched) >= NEAR_ALL * len(recent) and extra:
+        p.append(f"too broad: matches {len(matched)} of the {len(recent)} recent lines "
+                 f"from this source, nearly all of them, e.g. "
+                 f"{extra[0]['MESSAGE'][:200]!r}. Narrow it to this kind of line.")
+    if not src.endswith("/container"):  # podman logs all container output at err
+        mine = [x for x in map(_priority, examples) if x is not None]
+        floor = min(mine) if mine else None
+        worse = [e for e in extra if floor is not None and _priority(e) is not None
+                 and _priority(e) < floor and _priority(e) <= 4]
+        if worse:
+            name = PRIORITY_NAMES[_priority(worse[0])]
+            p.append(f"too broad: written for priority {PRIORITY_NAMES[floor]} lines but "
+                     f"also matches {len(worse)} more severe ones, e.g. ({name}) "
+                     f"{worse[0]['MESSAGE'][:200]!r}. Don't let it swallow warnings "
+                     "or errors; narrow it.")
     return p
 
 
@@ -293,10 +331,51 @@ def make(proposal, examples, flagged=False, review=""):
     return rule
 
 
-def fallback(examples, name, why):
-    """When no proper rule could be made: match only this exact line, collect
-    its matches and flag it for review."""
-    e = examples[0]
-    return make({"name": name, "regex": "^" + re.escape(e["MESSAGE"]) + "$",
-                 "actions": [{"block": "collect"}]},
-                [e], flagged=True, review=why)
+# What each template placeholder can stand for, as a regex.
+PLACEHOLDERS = [
+    ("uuid", re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I),
+     r"[0-9a-fA-F-]{36}"),
+    ("ip", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b"), r"[0-9.]+(?::\d+)?"),
+    ("ip6", re.compile(r"\b[0-9a-f]*:[0-9a-f]*:[0-9a-f:]+\b", re.I), r"[0-9a-fA-F:]+"),
+    ("hex", re.compile(r"\b0x[0-9a-f]+\b|\b[0-9a-f]{12,}\b", re.I), r"(?:0x)?[0-9a-fA-F]+"),
+    ("n", re.compile(r"(?<![A-Za-z_\d])\d+(?:\.\d+)?"), r"\d+(?:\.\d+)?"),
+]
+
+
+def template_regex(message):
+    """A regex for message's whole template group: the fixed text escaped,
+    and each number, address or id a named group (n1, ip1, hex1, ...)."""
+    spans = []
+    for kind, rx, _ in PLACEHOLDERS:  # same precedence as patterns.SUBS
+        for m in rx.finditer(message):
+            if not any(m.start() < e and s < m.end() for s, e, _ in spans):
+                spans.append((m.start(), m.end(), kind))
+    out, pos, n = [], 0, {}
+    for s, e, kind in sorted(spans):
+        n[kind] = n.get(kind, 0) + 1
+        out.append(re.escape(message[pos:s]))
+        out.append(f"(?P<{kind}{n[kind]}>{dict((k, r) for k, _, r in PLACEHOLDERS)[kind]})")
+        pos = e
+    out.append(re.escape(message[pos:]))
+    return "^" + "".join(out) + "$"
+
+
+def fallback(examples, name, why, rejected=None):
+    """When no proper rule could be made: a flagged rule for this group of
+    lines that counts them and keeps the first few for a human to read.
+
+    It matches the group's template (numbers, addresses and ids as named
+    groups), so one fallback covers the whole group instead of one exact
+    line. If that doesn't match every example, it falls back to the exact
+    first line."""
+    regex = template_regex(examples[0]["MESSAGE"])
+    c = re.compile(regex)
+    if any(not c.search(e["MESSAGE"][:4096]) for e in examples):
+        regex = "^" + re.escape(examples[0]["MESSAGE"]) + "$"
+    rule = make({"name": name, "regex": regex,
+                 "actions": [{"block": "count", "window": "day"},
+                             {"block": "collect", "limit": FALLBACK_KEEP}]},
+                examples, flagged=True, review=why)
+    if rejected:
+        rule["rejected"] = rejected
+    return rule

@@ -8,9 +8,12 @@
 (function () {
   const L = window.LABEL;
   const ITEM = L.item;
-  const KINDS = { w: "wrong", g: "good", h: "from_here", m: "missing" };
+  const KINDS = { w: "wrong", g: "good", h: "from_here", m: "missing",
+                  e: "unsupported", i: "unclear", b: "should_be", o: "no_better_option" };
   const KIND_NAMES = { wrong: "wrong", good: "good", from_here: "went wrong from here",
-                       missing: "missing" };
+                       missing: "missing", unsupported: "unsupported", unclear: "unclear",
+                       should_be: "should be…", no_better_option: "no better option" };
+  const LINK_NAMES = { duplicate: "duplicate of", related: "related to" };
 
   // Every markable block: the item's parts, its context, and refs' parts.
   const blocks = [];
@@ -34,6 +37,8 @@
     confidence: prior ? prior.confidence : null,
     note: prior ? prior.note || "" : "",
     marks: prior ? prior.marks.map(m => ({ ...m })) : [],
+    links: prior ? (prior.links || []).map(x => ({ ...x })) : [],
+    picker: null,         // {kind, filter} while choosing a link target
     sel: null,            // index into S.marks
     cursor: 0,            // index into blocks
     dirty: false,
@@ -42,7 +47,7 @@
 
   // A mark is a reason for the verdict unless the labeler says otherwise.
   function defaultReason(kind, verdict) {
-    if (verdict === "bad") return kind !== "good";
+    if (verdict === "bad") return kind !== "good" && kind !== "no_better_option";
     if (verdict === "good") return kind === "good";
     return false;
   }
@@ -197,13 +202,33 @@
               h("button", { class: "del", type: "button", title: "delete (x)",
                             onclick: () => del(i) }, "✕")),
             h("div", { class: "where", title: describe(m) }, describe(m)),
+            m.kind === "should_be" && h("input", {
+              type: "text", class: "mark-fix", "data-i": String(i),
+              placeholder: "should be what? (e.g. ignore, a capture group)",
+              value: m.fix || "",
+              oninput: e => { m.fix = e.target.value; S.dirty = true; } }),
             h("input", { type: "text", class: "mark-note", "data-i": String(i),
                          placeholder: "note", value: m.note || "",
                          oninput: e => { m.note = e.target.value; S.dirty = true; } }))))
           : h("div", { class: "keys" }, "Select text, then ", h("kbd", {}, "w"), " wrong · ",
               h("kbd", {}, "g"), " good · ", h("kbd", {}, "h"), " went wrong here · ",
               h("kbd", {}, "m"), " missing")),
-      h("button", { class: "save", type: "button", disabled: !v,
+      h("div", { class: "row" },
+        h("span", { class: "lbl" }, "Links"),
+        S.links.length ? h("ul", { class: "marks" }, S.links.map((x, i) =>
+          h("li", { class: "link" },
+            h("div", { class: "ctl" }, LINK_NAMES[x.kind],
+              h("button", { class: "del", type: "button", title: "remove",
+                            onclick: () => { S.links.splice(i, 1); S.dirty = true; render(); } },
+                "✕")),
+            h("div", { class: "where" },
+              h("a", { href: `${L.prefix}/i/${x.target}` }, x.title || `#${x.target}`))))) : null,
+        h("div", { class: "keys" },
+          h("a", { href: "#", onclick: e => { e.preventDefault(); openPicker("duplicate"); } },
+            "duplicate of…"), " (d) · ",
+          h("a", { href: "#", onclick: e => { e.preventDefault(); openPicker("related"); } },
+            "related to…"), " (l)")),
+      h("button", { class: "save", type: "button", disabled: !v && !hasDuplicate(),
                     onclick: () => save() }, "Save and next ⏎"),
       h("div", { class: "keys", style: "margin-top:8px" },
         h("a", { href: "#", onclick: e => { e.preventDefault(); save("skip"); } }, "skip"),
@@ -213,11 +238,75 @@
     return panel;
   }
 
+  const hasDuplicate = () => S.links.some(x => x.kind === "duplicate");
+
+  // --- links: pick an item you've already labeled -----------------------------
+  function openPicker(kind) {
+    S.picker = { kind, filter: "" };
+    render();
+    const f = document.getElementById("pick-filter");
+    if (f) f.focus();
+  }
+  function pickable() {
+    const f = (S.picker.filter || "").toLowerCase();
+    return L.recent.filter(r => !f || r.title.toLowerCase().includes(f) ||
+                                r.source.toLowerCase().includes(f));
+  }
+  function pick(r) {
+    if (!S.links.some(x => x.kind === S.picker.kind && x.target === r.id))
+      S.links.push({ kind: S.picker.kind, target: r.id, title: r.title, note: "" });
+    S.picker = null;
+    S.dirty = true;
+    render();
+  }
+  function renderPicker() {
+    const list = pickable();
+    return h("div", { class: "help picker" },
+      h("h3", {}, `${LINK_NAMES[S.picker.kind]}…`),
+      h("input", { type: "text", id: "pick-filter", placeholder: "filter, Enter picks the first",
+                   value: S.picker.filter,
+                   oninput: e => { S.picker.filter = e.target.value; refreshPicker(); },
+                   onkeydown: e => {
+                     if (e.key === "Enter") { e.preventDefault(); const r = pickable()[0];
+                                              if (r) pick(r); }
+                     if (e.key === "Escape") { S.picker = null; render(); }
+                   } }),
+      h("ul", { class: "marks", id: "pick-list" }, pickList(list)),
+      h("p", { class: "muted" }, "Items you labeled most recently. Esc closes."));
+  }
+  function pickList(list) {
+    return list.length ? list.map(r => h("li", { onclick: () => pick(r) },
+      h("div", {}, r.title), h("div", { class: "where" }, `${r.source} · ${r.verdict}`)))
+      : [h("li", {}, "Nothing you've labeled matches.")];
+  }
+  function refreshPicker() {
+    document.getElementById("pick-list").replaceChildren(...pickList(pickable()));
+  }
+
+  async function markGroupDuplicates() {
+    if (!L.group.length) return toast("Nothing else like this is waiting");
+    if (!confirm(`Skip all ${L.group.length} others like this as duplicates of this one?`))
+      return;
+    const resp = await fetch(L.group_api, { method: "POST",
+      body: JSON.stringify({ item_id: ITEM.id }), headers: { "Content-Type": "application/json" } });
+    if (!resp.ok) return toast("Failed: " + await resp.text());
+    const { n } = await resp.json();
+    L.group = [];
+    toast(`Marked ${n} as duplicates`);
+    render();
+  }
+
   function renderHelp() {
     const rows = [
       ["select text, then w / g", "mark it wrong / good (no selection: the whole part)"],
       ["click, then h", "it went wrong from here (only one per item)"],
       ["click, then m", "something is missing here"],
+      ["select, then e", "unsupported: might be true, but nothing shows it"],
+      ["select, then i", "unclear: I can't follow this"],
+      ["select, then b", "should be something else (type what)"],
+      ["select, then o", "no better option: wrong only because nothing better was allowed"],
+      ["d / l", "this item is a duplicate of / related to one you've labeled"],
+      ["D", "skip all other items like this as duplicates of this one"],
       ["M", "something is missing from the whole item"],
       ["j / k", "move between parts (marks without a selection go here)"],
       [", / .", "previous / next mark"],
@@ -270,13 +359,17 @@
         (L.previous.marks.length ? `, ${L.previous.marks.length} marks` : "") +
         (L.previous.note ? ` (“${L.previous.note}”)` : "") + ". ",
         h("a", { href: `${L.prefix}/i/${L.previous.item_id}` }, "see it")),
+      L.group.length ? h("div", { class: "banner" },
+        `${L.group.length} more like this waiting. `,
+        h("a", { href: "#", onclick: e => { e.preventDefault(); markGroupDuplicates(); } },
+          "Skip them all as duplicates of this one"), " (D)") : null,
       groups.parts,
       groups.context.length ? [h("div", { class: "group-title" }, "Context"),
                                groups.context] : null,
       Object.entries(groups.ref).map(([t, els]) =>
         [h("div", { class: "group-title" }, "Related: " + t), els]));
     app.replaceChildren(h("div", { class: "layout" }, main, renderPanel()),
-                        S.help ? renderHelp() : "");
+                        S.help ? renderHelp() : "", S.picker ? renderPicker() : "");
     window.scrollTo(0, scroll);
   }
 
@@ -346,6 +439,10 @@
     S.dirty = true;
     window.getSelection().removeAllRanges();
     render();
+    if (kind === "should_be") {
+      const f = document.querySelector(`.mark-fix[data-i="${S.sel}"]`);
+      if (f) f.focus();
+    }
   }
 
   function moveCursor(d) {
@@ -356,7 +453,7 @@
   }
 
   async function save(verdict) {
-    verdict = verdict || S.verdict;
+    verdict = verdict || S.verdict || (hasDuplicate() ? "skip" : null);
     if (!verdict) return toast("Pick a verdict first: 1 good, 2 bad, 3 unsure");
     const body = {
       item_id: ITEM.id, verdict, note: S.note,
@@ -365,7 +462,8 @@
       marks: S.marks.map(m => ({ item_id: m.item_id, part: m.part, start: m.start,
                                  end: m.end, kind: m.kind,
                                  reason: m.reason == null ? null : m.reason,
-                                 note: m.note || "" })),
+                                 note: m.note || "", fix: m.fix || null })),
+      links: S.links.map(x => ({ kind: x.kind, target: x.target, note: x.note || "" })),
     };
     const resp = await fetch(L.api, { method: "POST", body: JSON.stringify(body),
                                       headers: { "Content-Type": "application/json" } });
@@ -426,7 +524,8 @@
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
       if (e.key === "Escape") e.target.blur();
       else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
-      else if (e.key === "Enter" && e.target.classList.contains("mark-note")) {
+      else if (e.key === "Enter" && (e.target.classList.contains("mark-note") ||
+                                     e.target.classList.contains("mark-fix"))) {
         e.preventDefault(); e.target.blur();
       }
       return;
@@ -436,6 +535,9 @@
     let handled = true;
     if (KINDS[k]) addMark(KINDS[k]);
     else if (k === "M") addMark("missing", true);
+    else if (k === "d") openPicker("duplicate");
+    else if (k === "l") openPicker("related");
+    else if (k === "D") markGroupDuplicates();
     else if (k === "1") set({ verdict: "good" });
     else if (k === "2") set({ verdict: "bad" });
     else if (k === "3") set({ verdict: "unsure" });
@@ -460,7 +562,7 @@
     else if (k === "q") location.href = L.queue;
     else if (k === "?") toggleHelp();
     else if (k === "Escape") {
-      if (S.help) S.help = false; else S.sel = null;
+      if (S.help) S.help = false; else if (S.picker) S.picker = null; else S.sel = null;
       window.getSelection().removeAllRanges();
       render();
     }

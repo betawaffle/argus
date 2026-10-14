@@ -154,8 +154,9 @@ class Engine:
             self.log(f"  -> {'rule' if ok else 'FALLBACK'} {rule['name']}: "
                      f"{json.dumps(rule.get('actions'))}")
             # The new rule handles its own lines, and maybe other groups too.
-            # (A fallback matches one exact line; the rest of its group waits
-            # in pending rather than being learned again this run.)
+            # (A fallback matches its group's template, so it covers the
+            # group; if it had to fall back to one exact line, the rest of the
+            # group waits in pending rather than being learned again this run.)
             for key in [k for k in groups if k[0] == src]:
                 left = [e for e in groups[key] if not self.dispatch(e, src)]
                 if left:

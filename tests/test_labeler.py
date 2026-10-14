@@ -129,6 +129,74 @@ class CoreTest(unittest.TestCase):
         self.assertFalse(default_reason("wrong", "unsure"))
 
 
+class NewKindsLinksGroupsTest(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.src = ListSource("demo", [item("a", group="g1"), item("b", group="g1"),
+                                       item("c", group="g1"), item("d")])
+        self.store.sync([self.src])
+        self.id = {k: self.store.current_id("demo", k) for k in "abcd"}
+
+    def test_new_kinds_and_fix(self):
+        a = self.id["a"]
+        self.store.save_label(a, "andy", "bad", [
+            {"part": "p1", "start": 0, "end": 5, "kind": "should_be", "fix": "ignore"},
+            {"part": "p1", "kind": "unsupported"},
+            {"part": "p2", "kind": "unclear"},
+            {"part": "p2", "kind": "no_better_option"},
+            {"part": "p2", "kind": "wrong", "fix": "dropped: only should_be keeps it"},
+        ])
+        marks = self.store.latest_label(a, "andy")["marks"]
+        self.assertEqual(marks[0]["fix"], "ignore")
+        self.assertNotIn("fix", marks[4])
+        self.assertEqual([m["reason"] for m in marks], [True, True, True, False, True])
+
+    def test_links(self):
+        a, b = self.id["a"], self.id["b"]
+        self.store.save_label(a, "andy", "bad")
+        self.store.save_label(b, "andy", "skip", links=[{"kind": "duplicate", "target": a}])
+        (link,) = self.store.latest_label(b, "andy")["links"]
+        self.assertEqual((link["kind"], link["target"], link["title"]), ("duplicate", a, "item a"))
+        self.assertEqual(self.store.recent("andy", exclude=b)[0]["id"], a)
+        for bad in ([{"kind": "same", "target": a}], [{"kind": "related", "target": 999}],
+                    [{"kind": "related", "target": b}]):
+            with self.assertRaises(ValueError):
+                self.store.save_label(b, "andy", "skip", links=bad)
+
+    def test_groups(self):
+        a = self.id["a"]
+        self.assertEqual({r["id"] for r in self.store.group_of(a, "andy")},
+                         {self.id["b"], self.id["c"]})
+        self.assertEqual(self.store.group_of(self.id["d"], "andy"), [])
+        self.store.save_label(a, "andy", "bad")
+        self.assertEqual(self.store.mark_group_duplicates(a, "andy"), 2)
+        lab = self.store.latest_label(self.id["c"], "andy")
+        self.assertEqual((lab["verdict"], lab["links"][0]["target"]), ("skip", a))
+        self.assertEqual(self.store.group_of(a, "andy"), [])
+
+    def test_group_is_not_content(self):
+        # Changing an item's group must not make a new version.
+        self.src.list = [item("a", group="other")]
+        self.assertEqual(self.store.sync([self.src]), 0)
+
+    def test_migrates_old_db(self):
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        old = sqlite3.connect(path)
+        old.executescript("""
+            CREATE TABLE items (id INTEGER PRIMARY KEY, source TEXT, key TEXT, version TEXT,
+                snapshot TEXT, first_seen REAL, last_seen REAL, priority REAL DEFAULT 0,
+                current INTEGER DEFAULT 1, UNIQUE (source, key, version));
+            CREATE TABLE marks (id INTEGER PRIMARY KEY, label_id INTEGER, item_id INTEGER,
+                part TEXT, start INTEGER, end INTEGER, kind TEXT, reason INTEGER, note TEXT);
+            INSERT INTO marks (label_id, kind, reason) VALUES (1, 'wrong', 1);""")
+        old.commit()
+        old.close()
+        st = Store(path)
+        st.sync([ListSource("demo", [item("a", group="g")])])
+        self.assertEqual(st.db.execute("SELECT grp FROM items").fetchone()[0], "g")
+        self.assertIsNone(st.db.execute("SELECT fix FROM marks").fetchone()[0])
+
+
 class WebTest(unittest.TestCase):
     def setUp(self):
         self.src = ListSource("demo", [item("a", refs=[("other", "x")]),
@@ -167,6 +235,17 @@ class WebTest(unittest.TestCase):
         self.assertEqual(lab["marks"][0]["item_id"], ref_id)     # a mark into the ref
         status, _, loc = self.get("/label/next", f"source=demo&after={iid}")
         self.assertNotIn(f"/i/{iid}".encode(), loc)
+
+    def test_queue_collapses_groups_and_group_api(self):
+        app = App(Store(":memory:"), [ListSource("demo", [item(k, group="g") for k in "abc"]
+                                                 + [item("solo")])])
+        body = app.handle("GET", "/label", "")[2].decode()
+        self.assertIn("+2 like this", body)
+        self.assertEqual(body.count("/label/i/"), 2)
+        a = app.store.current_id("demo", "a")
+        status, _, out = app.handle("POST", "/label/api/group_duplicates", "",
+                                    json.dumps({"item_id": a}).encode())
+        self.assertEqual((status, json.loads(out)["n"]), (200, 2))
 
     def test_bad_post(self):
         self.get("/label")
